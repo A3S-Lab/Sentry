@@ -70,6 +70,21 @@ not printed, to keep the stream signal-dense:
 Run **without** the LLM/agent env vars for rules-only (L1) mode, or with `A3S_SENTRY_DRY_RUN=1` to
 judge + audit without writing any deny-file.
 
+## Deploy
+
+A reference Kubernetes DaemonSet is in [`deploy/daemonset.yaml`](deploy/daemonset.yaml): it pipes
+`observer-collector | sentry` on every node, shares the deny-files with observer's `enforce` /
+`fileguard` guards over an `emptyDir`, and ships with **dry-run on** so you shadow decisions before
+enforcing. Set your images, the agent cgroup path, RBAC, and the LLM secret for your cluster. CI
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) gates fmt + clippy + the full test suite on
+every push.
+
+**Shutdown is durable by design** — each decision is line-flushed to stdout and each deny is
+`append`-written + closed per target, so an abrupt `SIGTERM`/`SIGKILL` loses no committed audit or
+deny line. On normal pod termination the upstream closes the pipe → stdin EOF → sentry drains the
+in-flight worker queue and prints final stats before exiting. (No signal-handling dependency: only
+in-flight escalations — whose agent is terminating in the same pod — are dropped.)
+
 ## L1 — the rule engine
 
 Ships a conservative built-in rule set (privesc, reverse shells, pipe-to-shell, disk overwrite,
@@ -229,6 +244,8 @@ Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those
 | `pipeline.rs` | the `Judge` trait + L1→L2→L3 escalation |
 | `enforce.rs` | append blocks to observer deny-files |
 | `bin/sentry.rs` | the daemon (stdin → judge → enforce → audit) |
+| `deploy/daemonset.yaml` | reference k8s DaemonSet (observer → sentry → guards) |
+| `.github/workflows/ci.yml` | CI: fmt + clippy + full test suite |
 
 ## License
 

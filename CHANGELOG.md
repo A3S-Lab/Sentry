@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.0] — production-readiness: CI + deploy + verified-durable shutdown
+
+Closes the last of the four GA gaps (#1 chain/EPERM, #2 accuracy, #3 worker-pool, #4 ops).
+
+### Added
+- **CI** (`.github/workflows/ci.yml`) — gates `cargo fmt --check`, `clippy -D warnings`, and the full
+  test suite on every push / PR.
+- **Reference k8s DaemonSet** (`deploy/daemonset.yaml`) — `observer-collector | sentry` per node,
+  deny-files shared with observer's `enforce` / `fileguard` over an `emptyDir`, **dry-run on** for a
+  safe shadow-mode rollout before enforcing.
+
+### Verified (not changed)
+- **Graceful shutdown was already durable** — a review of the premise ("SIGTERM loses the final
+  flush") found it false: every decision is line-flushed (`println!` → `LineWriter`) and every deny is
+  `append`-written + closed per target, so an abrupt `SIGTERM`/`SIGKILL` loses no committed audit or
+  deny line. Normal pod termination closes the upstream pipe → stdin EOF → the worker queue drains and
+  final stats print before exit. No `signal-hook`/signal dependency added — it would only buy a
+  cosmetic summary line, and in-flight escalations belong to an agent terminating in the same pod.
+
 ## [0.3.3] — worker pool: no more L2/L3 head-of-line blocking
 
 ### Changed

@@ -1,8 +1,8 @@
 name: publish-ts
 
 # Publish the native napi SDK (@a3s-lab/sentry) to npm on a `ts-vX.Y.Z` tag. Builds the native addon
-# per platform, then publishes the main package + per-platform binaries (the napi-rs convention).
-# Requires an `NPM_TOKEN` secret. (The per-platform sub-packages live under the @a3s-lab npm scope.)
+# per platform, then publishes ONE package bundling all the .node binaries — the generated index.js
+# loads the right one per platform (its built-in local-file fallback). Requires an `NPM_TOKEN` secret.
 on:
   push:
     tags: ["ts-v*"]
@@ -36,17 +36,17 @@ jobs:
       - run: npm run build -- --target ${{ matrix.settings.target }}
       - run: npm test
         if: runner.os != 'Windows' # the suite uses a unix mock-agent .sh + unix-absolute paths
-
       - uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
-          path: sdk/typescript/*.node
+          path: |
+            sdk/typescript/*.node
+            sdk/typescript/index.js
+            sdk/typescript/index.d.ts
 
   publish:
     needs: build
     runs-on: ubuntu-latest
-    # NODE_AUTH_TOKEN applies to ALL steps: `napi prepublish` publishes the per-platform packages and
-    # `npm publish` the main one — both need the token.
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
@@ -56,10 +56,13 @@ jobs:
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
-      - run: npm install
       - uses: actions/download-artifact@v4
         with:
           path: sdk/typescript/artifacts
-      - run: npx napi artifacts --dir artifacts
-      - run: npx napi prepublish -t npm
+      - name: Bundle all platform binaries + the generated glue into the package
+        run: |
+          cp artifacts/*/*.node .
+          cp artifacts/bindings-x86_64-unknown-linux-gnu/index.js .
+          cp artifacts/bindings-x86_64-unknown-linux-gnu/index.d.ts .
+          echo "--- package will ship ---" && ls -lh *.node index.js index.d.ts
       - run: npm publish --access public

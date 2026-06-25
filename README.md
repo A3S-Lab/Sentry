@@ -121,6 +121,28 @@ short-circuits for response time; otherwise L3's deeper verdict (already running
 authoritative. High-risk events get the thorough check without paying the serial L2+L3 latency — at
 the cost of always running L3 for them (the speculation trade).
 
+## L3 — deep agent investigation
+
+L3 is a real [a3s-code](https://github.com/A3S-Lab/Code) agent that *investigates* a flagged event —
+loading the security skills and reasoning about the actor, the attack chain, and blast radius —
+rather than making a single classification call like L2. Enable it via the bridge script:
+
+```bash
+npm i -g @a3s-lab/code           # the agent SDK
+… | A3S_SENTRY_AGENT_BIN=$PWD/scripts/l3-agent.mjs \
+    A3S_SENTRY_SKILLS=$PWD/skills \
+    A3S_SENTRY_L3_URL=http://your-llm:18051/v1 A3S_SENTRY_L3_KEY=… A3S_SENTRY_L3_MODEL=glm5.1-w4a8 \
+    a3s-sentry
+```
+
+`scripts/l3-agent.mjs` runs the a3s-code agent with the [`skills/`](skills) playbooks and returns a
+`{verdict,severity,reason}` JSON. L3 is reached when **L2 escalates** (the LLM says it genuinely
+can't tell), **directly from L1** if no L2 is configured, or **speculatively** alongside L2 on
+high-risk events. It uses `A3S_SENTRY_L3_*` (falling back to `A3S_SENTRY_LLM_*`), so L3 can run a
+stronger/different model than L2 — or run without L2 at all. Validated against a live a3s-code + GLM:
+an SSH-private-key read → `block` with the agent reasoning *"a generic Python interpreter, not a known
+SSH client… key material can be transmitted outbound after being loaded into memory."*
+
 ## Config (env)
 
 | var | effect |
@@ -128,8 +150,9 @@ the cost of always running L3 for them (the speculation trade).
 | `A3S_SENTRY_POLICY` | extra L1 rules (HCL); built-ins always apply; **hot-reloaded** (~2s) |
 | `A3S_SENTRY_LLM_URL` | enable L2; OpenAI-compatible chat base URL (`…/v1`) |
 | `A3S_SENTRY_LLM_MODEL` / `_KEY` | L2 model name / bearer token |
-| `A3S_SENTRY_AGENT_BIN` | enable L3; the `a3s-code` binary |
+| `A3S_SENTRY_AGENT_BIN` | enable L3; the agent command (e.g. `scripts/l3-agent.mjs`) |
 | `A3S_SENTRY_SKILLS` | L3 security-skills directory (see [`skills/`](skills)) |
+| `A3S_SENTRY_L3_URL` / `_KEY` / `_MODEL` | L3 agent's LLM (falls back to `A3S_SENTRY_LLM_*`) |
 | `A3S_SENTRY_EGRESS_DENY` / `_FILE_DENY` / `_EXEC_DENY` | observer deny-files to append blocks to |
 | `A3S_SENTRY_FAIL_CLOSED` | unresolved escalations **block** (default: fail-open / allow) |
 | `A3S_SENTRY_SPECULATE` | run L2+L3 **in parallel** when L1 escalates at ≥ this severity (e.g. `high`) |
@@ -180,10 +203,12 @@ Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those
 - **Soak** (`scripts/soak.sh`) — sustained mixed load + a policy rewrite under load, with RSS /
   throughput / leak checks. Last run: **10M+ events at ~350k–850k ev/s, RSS flat, 0 panics**, deny-file
   bounded by dedup.
-- **Real LLM** — L2 validated against a live `glm5.1-w4a8`: blocks a credential read (`critical`),
+- **Real LLM + agent** — L2 validated against a live `glm5.1-w4a8`: blocks a credential read,
   *allows* a placeholder secret in a README (false-positive reduction). The real model (~16s — a
   reasoning model) exposed that the old hardcoded 10s timeout would fail **open** on real threats;
-  the timeout is now 30s by default and tunable (`A3S_SENTRY_LLM_TIMEOUT`).
+  it's now 30s by default and tunable. **L3 validated against a real a3s-code agent**: an SSH-private-key
+  read → a deep, attack-chain-aware `block` (the agent reasoned about the actor not being a known SSH
+  client and the key being exfiltratable from memory) — genuinely deeper than L2's single classification.
 
 ## Layout
 

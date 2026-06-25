@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0] — real L3 deep agent investigation
+
+### Added
+- **L3 is now a real a3s-code agent**, not a stub. `scripts/l3-agent.mjs` bridges to the
+  `@a3s-lab/code` SDK: it runs an a3s-code agent with the `skills/` security playbooks, deeply
+  investigates a flagged event (actor identity, attack chain, blast radius) and returns a
+  `{verdict,severity,reason}` JSON. Validated end-to-end against a live a3s-code + GLM: an
+  SSH-private-key read → an attack-chain-aware `block` ("a generic Python interpreter, not a known SSH
+  client… key material can be transmitted outbound after being loaded into memory").
+- L3 is reachable three ways: when **L2 escalates** (the LLM can now answer `"escalate"` when it
+  genuinely can't tell → L3), **directly from L1** when no L2 is configured, or **speculatively**
+  alongside L2 on high-risk events.
+- `A3S_SENTRY_L3_URL` / `_KEY` / `_MODEL` — L3's LLM config (falls back to `A3S_SENTRY_LLM_*`), so L3
+  can use a stronger/different model than L2, or run without L2.
+
+### Changed
+- The L2 prompt now offers `escalate` for genuinely-uncertain cases (hands off to L3) instead of
+  defaulting them to allow.
+
 ## [0.2.2] — real-LLM validation + L2 timeout fix
 
 ### Fixed

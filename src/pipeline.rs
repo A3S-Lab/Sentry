@@ -76,7 +76,9 @@ impl Pipeline {
         match (&self.l2, &self.l3) {
             (Some(l2), Some(l3)) if self.should_speculate(&d1) => self.speculative(l2, l3, ev),
             (Some(l2), _) => self.sequential(l2, ev),
-            (None, _) => self.resolve_unescalated(d1),
+            // No L2 but L3 present: L1's escalation goes straight to the deep investigator.
+            (None, Some(l3)) => l3.judge(ev),
+            (None, None) => self.resolve_unescalated(d1),
         }
     }
 
@@ -242,5 +244,14 @@ mod tests {
         let d = p.evaluate(&ev());
         assert_eq!(d.verdict, Verdict::Allow);
         assert_eq!(d.tier, Tier::Llm);
+    }
+
+    #[test]
+    fn l1_escalate_goes_straight_to_l3_when_no_l2() {
+        let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Escalate)))
+            .with_l3(Arc::new(Fixed(Tier::Agent, Verdict::Block)));
+        let d = p.evaluate(&ev());
+        assert_eq!(d.verdict, Verdict::Block);
+        assert_eq!(d.tier, Tier::Agent);
     }
 }

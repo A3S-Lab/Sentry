@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.2] — measured accuracy + eval-driven rule fixes
+
+### Added
+- **Accuracy evaluation** (`eval/` + `examples/eval.rs`): a 69-event labeled corpus and a harness
+  that runs the real pipeline and reports recall / precision / FP-rate. Measured: **L1 alone 47.8%
+  recall, 100% precision, 0% FP**; **L1+L2 (live GLM) 95.7% recall, 100% precision, 0% FP**.
+
+### Fixed (found by the eval)
+- **Bare `rm -rf /` was missed** — the `destructive-rm` regex's trailing `\b` didn't match a path
+  ending in `/`. Now caught (and `rm -rf /tmp/cache` still allowed).
+- **`.env` files** weren't covered by `read-credentials` → now escalated.
+- **OOB-exfil / pentest-callback domains** (`.oast.`, `.dnslog.`, interactsh, burpcollaborator, …)
+  are now a deterministic L1 **block** (unambiguous IOCs) instead of being left to a too-lenient L2.
+
 ## [0.3.1] — observer chain contract: verified + a real fix
 
 ### Fixed

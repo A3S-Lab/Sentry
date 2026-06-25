@@ -274,7 +274,7 @@ pub fn default_rules() -> Vec<RuleSpec> {
         r(
             "destructive-rm",
             "ToolExec",
-            r"(?i)(\brm\s+-[rf]{1,2}\w*\s+(/|/\*|~|\$HOME|/etc|/var|/usr|/boot|/root)\b|:\(\)\s*\{[^}]*\|[^}]*&[^}]*\}|find\s+/\S*\s+-delete)",
+            r"(?i)(\brm\s+-[rf]{1,2}\w*\s+(/(\s|$|\*)|~(\s|$)|\$HOME|/(etc|var|usr|boot|root|bin|lib|sys)\b)|:\(\)\s*\{[^}]*\|[^}]*&[^}]*\}|find\s+/\S*\s+-delete)",
             Block,
             High,
             "destructive delete / fork bomb",
@@ -304,7 +304,7 @@ pub fn default_rules() -> Vec<RuleSpec> {
         r(
             "read-credentials",
             "FileAccess",
-            r"(/etc/shadow|/etc/sudoers|/etc/passwd|\.ssh/id_|\.aws/credentials|\.kube/config|\.git-credentials|\.netrc|\.npmrc|\.docker/config\.json|/proc/self/environ|/var/run/secrets/kubernetes\.io|\.bash_history|\.gnupg/)",
+            r"(/etc/shadow|/etc/sudoers|/etc/passwd|\.ssh/id_|\.aws/credentials|\.kube/config|\.git-credentials|\.netrc|\.npmrc|\.docker/config\.json|/proc/self/environ|/var/run/secrets/kubernetes\.io|\.bash_history|\.gnupg/|/\.env\b)",
             Escalate,
             High,
             "access to a credential file",
@@ -340,13 +340,25 @@ pub fn default_rules() -> Vec<RuleSpec> {
             "cloud instance-metadata access (SSRF/cred theft)",
             Some("deny-egress"),
         ),
+        // Known out-of-band exfil / pentest-callback domains are unambiguous IOCs (≈zero legit use)
+        // → block deterministically rather than leave to L2 (the eval showed L2 was too lenient here).
+        r(
+            "oob-exfil-dns",
+            "Dns",
+            r"(?i)(\.oast\.|interactsh|burpcollaborator|\.dnslog\.|requestbin|pipedream\.net)",
+            Block,
+            High,
+            "out-of-band exfil / callback domain",
+            None,
+        ),
+        // metadata endpoints can be legit (a GCP agent) or SSRF — escalate for context.
         r(
             "suspicious-dns",
             "Dns",
-            r"(?i)(metadata\.google\.internal|\.oast\.|interactsh|burpcollaborator|\.dnslog\.)",
+            r"(?i)metadata\.google\.internal",
             Escalate,
             Medium,
-            "suspicious DNS (metadata / out-of-band exfil)",
+            "cloud metadata DNS",
             None,
         ),
     ]
@@ -489,11 +501,24 @@ mod tests {
     }
 
     #[test]
-    fn escalates_out_of_band_exfil_dns() {
+    fn blocks_out_of_band_exfil_dns() {
         let d = engine().evaluate(&ev(
             r#"{"event":{"Dns":{"pid":1,"query":"abcd1234.oast.fun"}}}"#,
         ));
-        assert_eq!(d.verdict, Verdict::Escalate);
-        assert!(d.reason.contains("suspicious-dns"));
+        assert_eq!(d.verdict, Verdict::Block);
+        assert!(d.reason.contains("oob-exfil-dns"));
+    }
+
+    #[test]
+    fn blocks_rm_rf_bare_root_but_not_subpaths() {
+        // the eval caught this: bare `rm -rf /` was missed (trailing \b didn't match a "/" at EOL)
+        let d = engine().evaluate(&ev(
+            r#"{"event":{"ToolExec":{"pid":1,"argv":["rm","-rf","/"]}}}"#,
+        ));
+        assert_eq!(d.verdict, Verdict::Block, "rm -rf / must block");
+        let ok = engine().evaluate(&ev(
+            r#"{"event":{"ToolExec":{"pid":1,"argv":["rm","-rf","/tmp/cache"]}}}"#,
+        ));
+        assert_eq!(ok.verdict, Verdict::Allow, "rm -rf /tmp/cache is legit");
     }
 }

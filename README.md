@@ -209,6 +209,10 @@ Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those
   it's now 30s by default and tunable. **L3 validated against a real a3s-code agent**: an SSH-private-key
   read → a deep, attack-chain-aware `block` (the agent reasoned about the actor not being a known SSH
   client and the key being exfiltratable from memory) — genuinely deeper than L2's single classification.
+- **Accuracy** — measured on a 69-event labeled corpus ([`eval/`](eval), `cargo run --example eval`):
+  **L1 alone 47.8% recall / 100% precision / 0% FP**; **L1+L2 (live GLM) 95.7% recall / 100% precision /
+  0% FP**. The eval found + fixed 3 real issues (bare `rm -rf /` missed, `.env` uncovered, OOB-exfil
+  domains too-lenient). Numbers are honest, not aspirational — the corpus + harness are in the repo.
 
 ## Layout
 

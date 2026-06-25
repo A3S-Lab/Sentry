@@ -12,12 +12,13 @@
 //! Config is all env (see `--help`): policy file, L2/L3 backends, deny-file sinks, fail mode.
 
 use a3s_sentry::{
-    AgentJudge, Decision, Enforcer, LlmJudge, ObservedEvent, Pipeline, RuleEngine, Severity, Tier,
+    AgentJudge, Decision, Enforcer, LiveRules, LlmJudge, ObservedEvent, Pipeline, Severity, Tier,
     Verdict,
 };
 use serde::Serialize;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
@@ -34,15 +35,18 @@ fn main() -> anyhow::Result<()> {
     }
 
     let cfg = Config::from_env();
-    let pipeline = cfg.build_pipeline()?;
+    let live = Arc::new(LiveRules::new(cfg.policy_path.clone())?);
+    let pipeline = cfg.build_pipeline(live.clone())?;
     let mut enforcer = cfg.build_enforcer();
 
     eprintln!(
-        "a3s-sentry {}: L1=on L2={} L3={} fail={} dry_run={} — reading observer NDJSON on stdin",
+        "a3s-sentry {}: L1={} rules L2={} L3={} fail={} speculate={} dry_run={} — reading observer NDJSON on stdin",
         env!("CARGO_PKG_VERSION"),
+        live.rule_count(),
         if cfg.llm_url.is_some() { "on" } else { "off" },
         if cfg.agent_bin.is_some() { "on" } else { "off" },
         if cfg.fail_closed { "closed" } else { "open" },
+        cfg.speculate_above.map_or("off", |_| "on"),
         cfg.dry_run,
     );
     // Loud footgun warning: rules-only + fail-open silently ALLOWS every escalate rule.
@@ -52,6 +56,25 @@ fn main() -> anyhow::Result<()> {
              secret egress, persistence, bind, …) resolves to ALLOW. Set A3S_SENTRY_FAIL_CLOSED=1, \
              or configure A3S_SENTRY_LLM_URL / A3S_SENTRY_AGENT_BIN, to act on them."
         );
+    }
+
+    // Hot-reload: poll the policy file every ~2s so any program that rewrites it updates the rules
+    // live, no restart. A parse error keeps the current rules (a bad edit never disarms the engine).
+    if cfg.policy_path.is_some() {
+        let reloader = Arc::clone(&live);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(2));
+            match reloader.reload_if_changed() {
+                Ok(true) => eprintln!(
+                    "a3s-sentry: policy reloaded — {} rules",
+                    reloader.rule_count()
+                ),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("a3s-sentry: policy reload failed (keeping current rules): {e}")
+                }
+            }
+        });
     }
 
     let stdin = std::io::stdin();
@@ -131,7 +154,7 @@ struct Audit<'a> {
 }
 
 struct Config {
-    policy: Option<String>,
+    policy_path: Option<PathBuf>,
     llm_url: Option<String>,
     llm_model: String,
     llm_key: Option<String>,
@@ -141,15 +164,15 @@ struct Config {
     file_deny: Option<PathBuf>,
     exec_deny: Option<PathBuf>,
     fail_closed: bool,
+    speculate_above: Option<Severity>,
     dry_run: bool,
 }
 
 impl Config {
     fn from_env() -> Self {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        let policy = env("A3S_SENTRY_POLICY").and_then(|p| std::fs::read_to_string(p).ok());
         Self {
-            policy,
+            policy_path: env("A3S_SENTRY_POLICY").map(PathBuf::from),
             llm_url: env("A3S_SENTRY_LLM_URL"),
             llm_model: env("A3S_SENTRY_LLM_MODEL").unwrap_or_else(|| "default".into()),
             llm_key: env("A3S_SENTRY_LLM_KEY"),
@@ -159,15 +182,18 @@ impl Config {
             file_deny: env("A3S_SENTRY_FILE_DENY").map(PathBuf::from),
             exec_deny: env("A3S_SENTRY_EXEC_DENY").map(PathBuf::from),
             fail_closed: env("A3S_SENTRY_FAIL_CLOSED").is_some(),
+            // Presence enables speculation; the value sets the severity threshold (default High).
+            speculate_above: env("A3S_SENTRY_SPECULATE").map(|v| parse_sev(&v)),
             dry_run: env("A3S_SENTRY_DRY_RUN").is_some(),
         }
     }
 
-    fn build_pipeline(&self) -> anyhow::Result<Pipeline> {
-        let rules = RuleEngine::with_defaults_and(self.policy.as_deref())?;
-        let mut p = Pipeline::new(Box::new(rules)).fail_closed(self.fail_closed);
+    fn build_pipeline(&self, live: Arc<LiveRules>) -> anyhow::Result<Pipeline> {
+        let mut p = Pipeline::new(live)
+            .fail_closed(self.fail_closed)
+            .speculate_above(self.speculate_above);
         if let Some(url) = &self.llm_url {
-            p = p.with_l2(Box::new(LlmJudge::new(
+            p = p.with_l2(Arc::new(LlmJudge::new(
                 url,
                 &self.llm_model,
                 self.llm_key.clone(),
@@ -175,7 +201,7 @@ impl Config {
             )));
         }
         if let Some(bin) = &self.agent_bin {
-            p = p.with_l3(Box::new(AgentJudge::new(
+            p = p.with_l3(Arc::new(AgentJudge::new(
                 bin.clone(),
                 self.skills_dir.clone(),
                 Duration::from_secs(120),
@@ -206,6 +232,17 @@ fn truncate(s: &str, n: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// Parse a severity name for the speculate threshold; anything else (incl. `1`) means `high`.
+fn parse_sev(s: &str) -> Severity {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "info" => Severity::Info,
+        "low" => Severity::Low,
+        "medium" => Severity::Medium,
+        "critical" => Severity::Critical,
+        _ => Severity::High,
+    }
+}
+
 const HELP: &str = "\
 a3s-sentry — tiered (L1 rules / L2 LLM / L3 a3s-code) runtime security control for AI agents.
 
@@ -213,7 +250,7 @@ Reads a3s-observer NDJSON on stdin, judges each event, enforces blocks via obser
 and writes a decision audit (NDJSON) on stdout. Pipe it after a3s-observer-collector.
 
 Env config:
-  A3S_SENTRY_POLICY=<file.hcl>    extra L1 rules (HCL); built-in rules always apply
+  A3S_SENTRY_POLICY=<file.hcl>    extra L1 rules (HCL); built-ins always apply; HOT-RELOADED (~2s)
   A3S_SENTRY_LLM_URL=<base/v1>    enable L2; OpenAI-compatible chat endpoint
   A3S_SENTRY_LLM_MODEL=<name>     L2 model (default: \"default\")
   A3S_SENTRY_LLM_KEY=<key>        L2 bearer token (optional)
@@ -223,5 +260,9 @@ Env config:
   A3S_SENTRY_FILE_DENY=<file>     observer file deny-file
   A3S_SENTRY_EXEC_DENY=<file>     observer exec deny-file
   A3S_SENTRY_FAIL_CLOSED=1        unresolved escalations BLOCK (default: fail-open / allow)
+  A3S_SENTRY_SPECULATE=<sev>      run L2+L3 in PARALLEL when L1 escalates at >= <sev> (default: high)
   A3S_SENTRY_DRY_RUN=1            judge + audit, but never write a deny-file
+
+The policy file is hot-reloaded: rewrite it from any program (or your config system) and the rules
+update live within ~2s, no restart. A parse error keeps the current rules.
 ";

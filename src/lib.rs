@@ -30,5 +30,5 @@ pub use enforce::Enforcer;
 pub use event::{Event, Identity, ObservedEvent};
 pub use llm::LlmJudge;
 pub use pipeline::{Judge, Pipeline};
-pub use rules::{default_rules, RuleEngine, RuleSpec};
+pub use rules::{default_rules, LiveRules, RuleEngine, RuleSpec};
 pub use verdict::{Decision, EnforceAction, Severity, Tier, Verdict};

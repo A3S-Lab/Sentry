@@ -10,6 +10,9 @@ use crate::pipeline::Judge;
 use crate::verdict::{Decision, Severity, Tier, Verdict};
 use regex::Regex;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, RwLock};
+use std::time::SystemTime;
 
 /// One L1 rule. Loaded from HCL; see `default_rules` for the built-in starter set.
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +118,84 @@ impl Judge for RuleEngine {
     fn judge(&self, ev: &ObservedEvent) -> Decision {
         self.evaluate(ev)
     }
+}
+
+/// A hot-reloadable rule set: the live [`RuleEngine`] behind an `RwLock`, plus the policy file it was
+/// built from. Call [`reload_if_changed`](LiveRules::reload_if_changed) on a timer (the daemon does,
+/// every ~2s) and any program that rewrites the HCL policy is picked up live, no restart. A parse
+/// error keeps the current rules — a bad edit never disarms the engine. Share it as `Arc<LiveRules>`:
+/// hand one clone to the pipeline (it's a [`Judge`]) and keep one for the reload loop.
+pub struct LiveRules {
+    engine: RwLock<RuleEngine>,
+    policy_path: Option<PathBuf>,
+    last_mtime: Mutex<Option<SystemTime>>,
+}
+
+impl LiveRules {
+    /// Build from an optional HCL policy file (plus the built-in defaults).
+    pub fn new(policy_path: Option<PathBuf>) -> anyhow::Result<Self> {
+        let engine = build_engine(policy_path.as_deref())?;
+        let mtime = policy_path.as_deref().and_then(mtime_of);
+        Ok(Self {
+            engine: RwLock::new(engine),
+            policy_path,
+            last_mtime: Mutex::new(mtime),
+        })
+    }
+
+    /// Re-read the policy file if its mtime changed and swap in the new rules. `Ok(true)` if it
+    /// reloaded, `Ok(false)` if unchanged or there's no policy file. On a parse/read error returns
+    /// `Err` and leaves the current rules in place.
+    pub fn reload_if_changed(&self) -> anyhow::Result<bool> {
+        let Some(path) = self.policy_path.as_deref() else {
+            return Ok(false);
+        };
+        if mtime_of(path) == *self.last_mtime.lock().unwrap() {
+            return Ok(false);
+        }
+        self.reload()?;
+        Ok(true)
+    }
+
+    /// Force a rebuild from the policy file now, regardless of mtime — for an explicit signal or an
+    /// embedder's "apply config" call. A no-op when there's no policy file.
+    pub fn reload(&self) -> anyhow::Result<()> {
+        if let Some(path) = self.policy_path.as_deref() {
+            let fresh = build_engine(Some(path))?;
+            *self.engine.write().unwrap() = fresh;
+            *self.last_mtime.lock().unwrap() = mtime_of(path);
+        }
+        Ok(())
+    }
+
+    pub fn rule_count(&self) -> usize {
+        self.engine.read().unwrap().len()
+    }
+}
+
+impl Judge for LiveRules {
+    fn tier(&self) -> Tier {
+        Tier::Rules
+    }
+    fn judge(&self, ev: &ObservedEvent) -> Decision {
+        self.engine.read().unwrap().evaluate(ev)
+    }
+}
+
+/// Read the HCL policy at `path` (if any) and build a `RuleEngine` with the built-in defaults.
+fn build_engine(path: Option<&Path>) -> anyhow::Result<RuleEngine> {
+    let hcl = match path {
+        Some(p) => Some(
+            std::fs::read_to_string(p)
+                .map_err(|e| anyhow::anyhow!("reading policy {}: {e}", p.display()))?,
+        ),
+        None => None,
+    };
+    RuleEngine::with_defaults_and(hcl.as_deref())
+}
+
+fn mtime_of(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// Built-in starter rules — a sane default so sentry is useful with no policy file. Sites extend or
@@ -356,5 +437,36 @@ mod tests {
         ));
         assert_eq!(d.verdict, Verdict::Escalate);
         assert!(d.reason.contains("rce-primitive"));
+    }
+
+    #[test]
+    fn live_rules_reload_picks_up_new_policy() {
+        let dir = std::env::temp_dir().join(format!("sentry-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("policy.hcl");
+        std::fs::write(&path, "rules = []\n").unwrap();
+        let live = LiveRules::new(Some(path.clone())).unwrap();
+
+        let nc = ev(r#"{"event":{"ToolExec":{"pid":1,"argv":["nc","10.0.0.1","4444"]}}}"#);
+        assert_eq!(
+            live.judge(&nc).verdict,
+            Verdict::Allow,
+            "no rule blocks bare nc yet"
+        );
+
+        // rewrite the policy to block nc, force a reload — the change is live, no restart
+        std::fs::write(
+            &path,
+            r#"rules = [ { name = "no-nc", on = "ToolExec", match = "\\bnc\\b", verdict = "block", severity = "medium", reason = "nc" } ]"#,
+        )
+        .unwrap();
+        live.reload().unwrap();
+        assert_eq!(
+            live.judge(&nc).verdict,
+            Verdict::Block,
+            "reloaded rule now blocks nc"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

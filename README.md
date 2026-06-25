@@ -86,17 +86,53 @@ rules = [
 
 First match wins; no match = allow. See [`policy/rules.hcl`](policy/rules.hcl).
 
+## Dynamic policy & embedding
+
+**Hot-reload.** The policy file is watched — rewrite it from any program (a controller, your config
+system, an operator) and the rules update **live within ~2s, no restart**. A parse error keeps the
+current rules, so a bad edit never disarms the engine. This is the language-agnostic way to drive
+sentry dynamically: your logic, in any language, rewrites the HCL.
+
+**Embed it.** sentry is a library — build the pipeline in-process and apply config changes at runtime:
+
+```rust
+use a3s_sentry::{LiveRules, LlmJudge, Pipeline, Severity};
+use std::{sync::Arc, time::Duration};
+
+let rules = Arc::new(LiveRules::new(Some("rules.hcl".into()))?);   // hot-reloadable
+let pipeline = Pipeline::new(rules.clone())                        // L1
+    .with_l2(Arc::new(LlmJudge::new("http://llm:18051/v1", "glm", None, Duration::from_secs(10))))
+    .speculate_above(Some(Severity::High))   // run L2 + L3 in parallel on high-risk
+    .fail_closed(false);
+
+let decision = pipeline.evaluate(&observed_event);   // your own event source
+rules.reload()?;   // force-apply config changes now (e.g. on a signal / admin API)
+```
+
+Every tier is a `Judge` trait impl, so you can swap L1/L2/L3 for your own (a different model, an
+in-house ruleset) and keep the escalation machinery.
+
+## Speculative parallelism
+
+By default the tiers run serially (L2, then L3 only if L2 escalates). Set `A3S_SENTRY_SPECULATE=high`
+(or `.speculate_above(Some(Severity::High))`) and, when **L1 escalates at or above that severity, L2
+and L3 run concurrently** — L3's deep look starts immediately instead of after L2. A fast L2 `Block`
+short-circuits for response time; otherwise L3's deeper verdict (already running, so ready sooner) is
+authoritative. High-risk events get the thorough check without paying the serial L2+L3 latency — at
+the cost of always running L3 for them (the speculation trade).
+
 ## Config (env)
 
 | var | effect |
 |---|---|
-| `A3S_SENTRY_POLICY` | extra L1 rules (HCL); built-ins always apply |
+| `A3S_SENTRY_POLICY` | extra L1 rules (HCL); built-ins always apply; **hot-reloaded** (~2s) |
 | `A3S_SENTRY_LLM_URL` | enable L2; OpenAI-compatible chat base URL (`…/v1`) |
 | `A3S_SENTRY_LLM_MODEL` / `_KEY` | L2 model name / bearer token |
 | `A3S_SENTRY_AGENT_BIN` | enable L3; the `a3s-code` binary |
 | `A3S_SENTRY_SKILLS` | L3 security-skills directory (see [`skills/`](skills)) |
 | `A3S_SENTRY_EGRESS_DENY` / `_FILE_DENY` / `_EXEC_DENY` | observer deny-files to append blocks to |
 | `A3S_SENTRY_FAIL_CLOSED` | unresolved escalations **block** (default: fail-open / allow) |
+| `A3S_SENTRY_SPECULATE` | run L2+L3 **in parallel** when L1 escalates at ≥ this severity (e.g. `high`) |
 | `A3S_SENTRY_DRY_RUN` | judge + audit, never write a deny-file |
 
 ## Honest boundaries

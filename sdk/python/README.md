@@ -9,8 +9,11 @@ judge from one ACL config and call `evaluate` on observer events — judging hap
 
 ## Install
 
+abi3 wheels (py3.9+) are published to GitHub Releases (not PyPI yet, matching a3s-code). Grab the
+wheel for your platform from the [`python-v0.1.0` release](https://github.com/A3S-Lab/Sentry/releases/tag/python-v0.1.0):
+
 ```bash
-pip install a3s-sentry
+pip install a3s_sentry-0.1.0-cp39-abi3-manylinux_2_39_x86_64.whl   # or the macOS / Windows wheel
 ```
 
 Or from a checkout (builds the native extension into the current environment):

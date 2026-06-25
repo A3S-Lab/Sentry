@@ -40,12 +40,16 @@ the kernel the single enforcement point.
 
 ## Install
 
-A `vX.Y.Z` tag runs [`release.yml`](.github/workflows/release.yml), which publishes:
+Published from the repo's own GitHub Actions (a `vX.Y.Z` tag runs [`release.yml`](.github/workflows/release.yml)):
 
-- **Container** — `ghcr.io/a3s-lab/sentry:<version>` (L1 + L2 out of the box; for L3 layer Node +
-  `@a3s-lab/code` into a derived image). `docker run --rm -i ghcr.io/a3s-lab/sentry:latest < events.ndjson`
-- **Static binary** — `a3s-sentry-x86_64-linux`, attached to the GitHub Release.
+- **Daemon image** — `ghcr.io/a3s-lab/sentry:0.6.0` (and `:latest`). L1 + L2 out of the box; for L3
+  layer Node + `@a3s-lab/code` into a derived image.
+  `docker run --rm -i ghcr.io/a3s-lab/sentry:latest < events.ndjson`
+- **Daemon binary** — `a3s-sentry-x86_64-linux` on the
+  [`v0.6.0` release](https://github.com/A3S-Lab/Sentry/releases/tag/v0.6.0).
 - **From source** — `cargo build --release` → `target/release/sentry`.
+- **SDKs** — `npm install @a3s-lab/sentry` (TypeScript); Python wheels on the
+  [`python-v0.1.0` release](https://github.com/A3S-Lab/Sentry/releases/tag/python-v0.1.0) (see [SDKs](#sdks-python--typescript)).
 
 Operating it in production? See the [**operator runbook**](docs/RUNBOOK.md) (rollout, fail mode,
 alarms, tuning).
@@ -150,7 +154,9 @@ evaluate observer events in-process; no daemon, no subprocess. Each is verified 
 through the embedded engine (a cloud-metadata SSRF → `block`/`DenyEgress`; an SDK-authored ACL rule
 firing at `tier=Rules`).
 
-- **Python** — [`sdk/python`](sdk/python) (`pip install a3s-sentry`):
+- **Python** — [`sdk/python`](sdk/python). abi3 wheels (py3.9+) are on the
+  [`python-v0.1.0` release](https://github.com/A3S-Lab/Sentry/releases/tag/python-v0.1.0) —
+  `pip install` the wheel for your platform (not on PyPI yet, matching a3s-code):
 
   ```python
   from a3s_sentry import Sentry, egress, tool_exec
@@ -161,7 +167,7 @@ firing at `tier=Rules`).
   d2, enforced = sentry.evaluate_and_enforce(tool_exec(2, ["/usr/bin/ncat", "h", "4444"]))
   ```
 
-- **TypeScript** — [`sdk/typescript`](sdk/typescript) (`@a3s-lab/sentry`, Node ≥12):
+- **TypeScript** — [`sdk/typescript`](sdk/typescript), live on npm: `npm install @a3s-lab/sentry` (Node ≥12):
 
   ```ts
   import { Sentry, egress } from "@a3s-lab/sentry";

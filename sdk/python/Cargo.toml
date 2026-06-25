@@ -1,0 +1,16 @@
+[package]
+name = "a3s-sentry-py"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native (PyO3) Python bindings for a3s-sentry — the in-process tiered security judge."
+repository = "https://github.com/A3S-Lab/Sentry"
+
+[lib]
+name = "a3s_sentry"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+a3s-sentry = { path = "../.." }
+serde_json = "1"

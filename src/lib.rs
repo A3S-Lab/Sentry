@@ -18,19 +18,23 @@
 //! The tiers are composed by [`Pipeline`]; each is a [`Judge`], so the set is swappable and testable.
 
 pub mod agent;
+pub mod config;
 pub mod enforce;
 pub mod event;
 pub mod llm;
 pub mod metrics;
 pub mod pipeline;
 pub mod rules;
+pub mod sdk;
 pub mod verdict;
 
 pub use agent::AgentJudge;
+pub use config::SdkConfig;
 pub use enforce::Enforcer;
 pub use event::{Event, Identity, ObservedEvent};
 pub use llm::LlmJudge;
 pub use metrics::Metrics;
 pub use pipeline::{Judge, Pipeline};
 pub use rules::{default_rules, LiveRules, RuleEngine, RuleSpec};
+pub use sdk::Sentry;
 pub use verdict::{Decision, EnforceAction, Severity, Tier, Verdict};

@@ -1,7 +1,8 @@
 name: publish-ts
 
-# Publish the TypeScript SDK (@a3s-lab/sentry) to npm on a `ts-vX.Y.Z` tag (independent of the
-# daemon's `v*` tags). Requires an `NPM_TOKEN` repository secret.
+# Publish the native napi SDK (@a3s-lab/sentry) to npm on a `ts-vX.Y.Z` tag. Builds the native addon
+# per platform, then publishes the main package + per-platform binaries (the napi-rs convention).
+# Requires an `NPM_TOKEN` secret. (The per-platform sub-packages live under the @a3s-lab npm scope.)
 on:
   push:
     tags: ["ts-v*"]
@@ -9,22 +10,51 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    working-directory: sdk/typescript
+
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sdk/typescript
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - { host: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { host: macos-latest, target: aarch64-apple-darwin }
+          - { host: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: ${{ matrix.settings.target }} }
+      - run: npm install
+      - run: npm run build -- --target ${{ matrix.settings.target }}
+      - run: npm test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: sdk/typescript/*.node
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
-      - run: npm ci
-      - name: build + test
-        run: npm test # tsc + node --test; the integration test auto-skips (no binary)
-      - name: publish
-        run: npm publish --access public
+      - run: npm install
+      - uses: actions/download-artifact@v4
+        with:
+          path: sdk/typescript/artifacts
+      - run: npx napi artifacts --dir artifacts
+      - run: npx napi prepublish -t npm
+      - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

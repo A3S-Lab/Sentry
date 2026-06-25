@@ -143,39 +143,37 @@ in-house ruleset) and keep the escalation machinery.
 
 ## SDKs (Python · TypeScript)
 
-Drive sentry from your own code — author ACL policy, run the judge, submit events, stream typed
-decisions, read metrics — instead of wiring stdin/stdout by hand. Both are dependency-free and mirror
-the same model; each is contract-tested against the real binary (an SSRF event round-trips to a
-`block`, and an SDK-authored ACL rule fires through the daemon's own parser).
+**Native, in-process** SDKs — the Rust L1/L2/L3 judge embedded via PyO3 (Python) and napi-rs
+(TypeScript), the same model as [`@a3s-lab/code`](https://github.com/A3S-Lab/Code). Build the judge
+from one ACL config (the daemon's whole config in a single file — rules + L2/L3 backends + sinks) and
+evaluate observer events in-process; no daemon, no subprocess. Each is verified by judging real events
+through the embedded engine (a cloud-metadata SSRF → `block`/`DenyEgress`; an SDK-authored ACL rule
+firing at `tier=Rules`).
 
-- **Python** — [`sdk/python`](sdk/python) (`pip install a3s-sentry`), async:
+- **Python** — [`sdk/python`](sdk/python) (`pip install a3s-sentry`):
 
   ```python
-  from a3s_sentry import Sentry, SentryConfig, Event, Policy, Rule, Verdict, Severity, Action
+  from a3s_sentry import Sentry, egress, tool_exec
 
-  Policy([Rule("no-netcat", "ToolExec", r"(?i)\b(ncat|netcat)\b",
-               Verdict.BLOCK, Severity.MEDIUM, "netcat", Action.DENY_EXEC)]).write("rules.acl")
-
-  async with Sentry(SentryConfig(policy="rules.acl", egress_deny="egress.txt")) as s:
-      await s.submit(Event.egress(1, "169.254.169.254", 80))      # cloud-metadata SSRF
-      async for audit in s.decisions():
-          print(audit.decision.verdict, audit.subject); break
+  sentry = Sentry.create("sentry.acl")               # ACL file path or content
+  d = sentry.evaluate(egress(1, "169.254.169.254", 80))   # cloud-metadata SSRF
+  print(d.verdict, d.action.kind, d.action.target)   # block DenyEgress 169.254.169.254
+  d2, enforced = sentry.evaluate_and_enforce(tool_exec(2, ["/usr/bin/ncat", "h", "4444"]))
   ```
 
-- **TypeScript** — [`sdk/typescript`](sdk/typescript) (`@a3s-lab/sentry`), Node 18+:
+- **TypeScript** — [`sdk/typescript`](sdk/typescript) (`@a3s-lab/sentry`, Node ≥12):
 
   ```ts
-  import { Sentry, Policy, Event } from "@a3s-lab/sentry";
+  import { Sentry, egress } from "@a3s-lab/sentry";
 
-  new Policy([{ name: "no-netcat", on: "ToolExec", match: "(?i)\\b(ncat|netcat)\\b",
-                verdict: "block", severity: "medium", reason: "netcat", action: "deny-exec" }])
-    .write("rules.acl");
-
-  const s = new Sentry({ policy: "rules.acl", egressDeny: "egress.txt" });
-  await s.start();
-  await s.submit(Event.egress(1, "169.254.169.254", 80));
-  for await (const audit of s.decisions()) { console.log(audit.decision.verdict, audit.subject); break; }
+  const sentry = Sentry.create("sentry.acl");
+  const d = sentry.evaluate(egress(1, "169.254.169.254", 80));
+  if (d?.verdict === "block") console.log(d.reason, d.action); // { kind: "DenyEgress", target: "…" }
   ```
+
+The `sentry.acl` config — rules, optional `llm {}` (L2) / `agent {}` (L3) backends, and `deny {}`
+sinks — is shown in each SDK's README. Event builders (`egress`, `toolExec`, `dns`, `fileAccess`,
+`sslContent`, `securityAction`) construct the event JSON `evaluate` takes.
 
 ## Speculative parallelism
 

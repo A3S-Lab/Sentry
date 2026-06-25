@@ -143,6 +143,16 @@ impl LiveRules {
         })
     }
 
+    /// Wrap an already-built [`RuleEngine`] with no policy file (so it never reloads). For an
+    /// in-process embedder that built its rules from memory rather than a watched file.
+    pub fn from_engine(engine: RuleEngine) -> Self {
+        Self {
+            engine: RwLock::new(engine),
+            policy_path: None,
+            last_mtime: Mutex::new(None),
+        }
+    }
+
     /// Re-read the policy file if its mtime changed and swap in the new rules. `Ok(true)` if it
     /// reloaded, `Ok(false)` if unchanged or there's no policy file. On a parse/read error returns
     /// `Err` and leaves the current rules in place.

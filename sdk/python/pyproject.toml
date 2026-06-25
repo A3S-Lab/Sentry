@@ -1,18 +1,22 @@
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
 [project]
 name = "a3s-sentry"
 version = "0.1.0"
-description = "Python SDK for a3s-sentry — author ACL policy, run the judge, stream typed decisions."
+description = "Native (PyO3) Python SDK for a3s-sentry — the in-process tiered (L1 rules / L2 LLM / L3 agent) security judge."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-dependencies = []
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
 
 [project.urls]
 Repository = "https://github.com/A3S-Lab/Sentry"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["a3s_sentry"]
+[tool.maturin]
+module-name = "a3s_sentry"
+features = ["pyo3/extension-module"]

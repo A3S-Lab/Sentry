@@ -1,7 +1,7 @@
 name: publish-python
 
-# Publish the Python SDK to PyPI on a `python-vX.Y.Z` tag (independent of the daemon's `v*` tags).
-# Requires a `PYPI_API_TOKEN` repository secret.
+# Publish the native PyO3 Python SDK to PyPI on a `python-vX.Y.Z` tag (independent of the daemon's
+# `v*` tags). Builds an abi3 wheel per platform with maturin. Requires a `PYPI_API_TOKEN` secret.
 on:
   push:
     tags: ["python-v*"]
@@ -10,24 +10,35 @@ permissions:
   contents: read
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sdk/python
+  wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+        with: { submodules: true }
+      - uses: PyO3/maturin-action@v1
         with:
-          python-version: "3.12"
-      - name: test
-        run: python -m unittest discover -s tests -t . # integration tests auto-skip (no binary)
-      - name: build
-        run: |
-          pip install --upgrade build twine
-          python -m build
-      - name: publish
-        run: twine upload dist/*
+          command: build
+          args: --release --out dist --manifest-path sdk/python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist
+
+  publish:
+    needs: wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --skip-existing dist/*
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}

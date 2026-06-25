@@ -1,72 +1,109 @@
-# a3s-sentry — Python SDK
+# a3s-sentry (Python SDK)
 
-Author [a3s-sentry](../../) policy in code, run the judge, stream typed decisions, and read its
-metrics. Pure standard library — no dependencies. Async (`asyncio`).
+Native (PyO3) Python bindings for [a3s-sentry](https://github.com/A3S-Lab/Sentry) — the tiered
+(L1 rules / L2 LLM / L3 a3s-code agent) runtime security judge for AI agents.
+
+This is an **in-process** binding: the Rust `Sentry` judge runs inside your Python process. There is
+**no daemon and no subprocess** to manage (beyond what an L3 agent tier itself spawns). You build the
+judge from one ACL config and call `evaluate` on observer events — judging happens locally, in-process.
+
+## Install
 
 ```bash
-pip install a3s-sentry        # or: pip install -e sdk/python
+pip install a3s-sentry
 ```
 
-## Author policy (ACL, hot-reloaded)
-
-Rules are an ordered list (first match wins). `Policy.write` writes the ACL file atomically, so
-sentry's ~2s hot-reload never sees a half-written policy — rewrite it any time to update rules live.
-
-```python
-from a3s_sentry import Policy, Rule, Verdict, Severity, Action
-
-Policy([
-    Rule("no-netcat", on="ToolExec", match=r"(?i)\b(ncat|netcat)\b",
-         verdict=Verdict.BLOCK, severity=Severity.MEDIUM, reason="netcat", action=Action.DENY_EXEC),
-    Rule("admin-egress", on="Egress", match=r"^10\.0\.99\.",
-         verdict=Verdict.ESCALATE, severity=Severity.MEDIUM, reason="admin subnet"),
-]).write("rules.acl")
-```
-
-## Run sentry, submit events, stream decisions
-
-Sentry emits an audit line only for blocks / escalations / flagged events — plain benign allows are
-counted, not printed — so `decisions()` yields exactly the noteworthy ones.
-
-```python
-import asyncio
-from a3s_sentry import Sentry, SentryConfig, Event, Verdict
-
-async def main():
-    cfg = SentryConfig(policy="rules.acl", egress_deny="egress-deny.txt",
-                       llm_url="http://llm:18051/v1")  # L2 optional
-    async with Sentry(cfg) as s:
-        await s.submit(Event.egress(pid=1, peer="169.254.169.254", port=80))  # cloud-metadata SSRF
-        async for audit in s.decisions():
-            d = audit.decision
-            print(d.verdict, audit.subject, "->", d.action and (d.action.kind, d.action.target))
-            if d.verdict is Verdict.BLOCK:
-                break
-
-asyncio.run(main())
-```
-
-Event builders: `tool_exec`, `egress`, `file_access`, `dns`, `ssl_content`, `security_action`.
-
-## Read metrics
-
-```python
-from a3s_sentry import MetricsClient
-
-m = MetricsClient("127.0.0.1:9100")        # SentryConfig(metrics_addr="127.0.0.1:9100")
-assert m.health()
-snap = m.metrics()
-# alarm on these two — both mean a block did not take effect:
-print(snap.overload_degraded, snap.enforce_failed)
-```
-
-## Test
+Or from a checkout (builds the native extension into the current environment):
 
 ```bash
 cd sdk/python
-cargo build --manifest-path ../../Cargo.toml      # build the sentry binary for the integration tests
-python -m unittest discover -s tests -t .
+maturin develop          # or: maturin build --release
 ```
 
-The integration tests run the real `sentry` binary (from `target/debug`, or `A3S_SENTRY_BIN`) and are
-skipped if it isn't present.
+## Quick start
+
+Author a unified ACL config (`sentry.acl`) — L1 rules, optional L2/L3 backends, deny-file sinks:
+
+```hcl
+fail_closed = false
+
+deny  { egress = "egress.txt" file = "file.txt" exec = "exec.txt" }
+
+rules = [
+  { name = "block-evil-dns", on = "Dns", match = "evil\\.test",
+    verdict = "block", severity = "high", reason = "known-bad domain" },
+]
+```
+
+Build the judge and evaluate observer events:
+
+```python
+from a3s_sentry import Sentry, egress, dns, tool_exec
+
+# `create` takes a config PATH (if it's a readable file) or inline ACL content.
+sentry = Sentry.create("sentry.acl")
+
+# Built-in default rules always apply — e.g. cloud-metadata SSRF.
+d = sentry.evaluate(egress(1234, "169.254.169.254", 80))
+print(d.verdict)          # "block"
+print(d.tier)             # "Rules"
+print(d.severity)         # "high"
+print(d.action.kind)      # "DenyEgress"
+print(d.action.target)    # "169.254.169.254"
+
+# A benign event is allowed.
+print(sentry.evaluate(tool_exec(1234, ["ls", "-la"])).verdict)   # "allow"
+
+# An unparseable line returns None.
+assert sentry.evaluate("not json") is None
+```
+
+A `Decision` exposes `verdict` (`"allow"`/`"block"`/`"escalate"`), `tier` (`"Rules"`/`"Llm"`/`"Agent"`),
+`severity` (`"info"`..`"critical"`), `reason`, and `action` (an `EnforceAction` with `kind` +
+`target`, or `None`).
+
+## Enforcing (writing the deny-file)
+
+`evaluate_and_enforce` judges the event and, on a `block` carrying a target, writes the deny to the
+configured deny-file sink (which a3s-observer's kernel guards read). It returns `(decision, path)`,
+where `path` is the deny-file the block landed in (or `None`):
+
+```python
+from a3s_sentry import Sentry, tool_exec
+
+sentry = Sentry.create("""
+deny  { exec = "exec.txt" }
+rules = [
+  { name = "no-netcat", on = "ToolExec", match = "nc",
+    verdict = "block", severity = "high", reason = "netcat",
+    action = "deny-exec" },
+]
+""")
+
+decision, enforced = sentry.evaluate_and_enforce(tool_exec(1, ["/usr/bin/nc", "x", "4444"]))
+print(decision.verdict)   # "block"
+print(enforced)           # "exec.txt"  (now contains /usr/bin/nc)
+```
+
+## Event builders
+
+These return the observer event JSON string that `evaluate` / `evaluate_and_enforce` take. Each
+also accepts optional `agent=` and `provider=` keywords (added to the event's identity/provider):
+
+| Builder | Signature |
+|---------|-----------|
+| `tool_exec` | `tool_exec(pid, argv)` |
+| `egress` | `egress(pid, peer, port=0)` |
+| `file_access` | `file_access(pid, path, write=False)` |
+| `dns` | `dns(pid, query)` |
+| `ssl_content` | `ssl_content(pid, content, is_read=False)` |
+| `security_action` | `security_action(pid, kind, detail=0)` |
+
+## Develop & test
+
+```bash
+cd sdk/python
+python3 -m venv .venv && . .venv/bin/activate
+maturin develop
+python -m unittest discover -s tests -t .
+```

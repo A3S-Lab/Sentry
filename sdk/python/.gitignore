@@ -1,6 +1,5 @@
+target/
 __pycache__/
-*.pyc
-*.egg-info/
+*.so
 dist/
-build/
-.pytest_cache/
+.venv/

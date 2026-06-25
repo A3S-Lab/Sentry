@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0] — embeddable judge + native in-process SDKs
+
+The SDKs are now **native in-process bindings** (PyO3 / napi-rs), not subprocess wrappers — the Rust
+L1/L2/L3 judge embedded in your process, matching [`@a3s-lab/code`](https://github.com/A3S-Lab/Code)'s
+architecture. Build the judge from one ACL config and judge events in-process; no daemon, no subprocess.
+
+### Added
+- **Embeddable `Sentry`** (`src/sdk.rs`, `src/config.rs`) — `Sentry::create(acl)` builds the pipeline
+  from one ACL config; `evaluate(event) -> Option<Decision>` and `evaluate_and_enforce` judge in
+  process. The unified `sentry.acl` carries everything — rules + optional `llm {}` (L2) / `agent {}`
+  (L3) backends + `deny {}` sinks + fail mode (example: [`policy/sentry.acl`](policy/sentry.acl)).
+  Plus `LiveRules::from_engine` to build L1 from in-memory rules.
+- **Native SDKs** (replacing the subprocess wrappers):
+  - **Python** ([`sdk/python`](sdk/python), `a3s-sentry`) — PyO3 + maturin, abi3-py39 wheels.
+    `Sentry.create` / `evaluate` / `evaluate_and_enforce`, event builders, `Decision`/`EnforceAction`.
+    8 tests.
+  - **TypeScript** ([`sdk/typescript`](sdk/typescript), `@a3s-lab/sentry`) — napi-rs, generated
+    `.d.ts`, prebuilt per-platform binaries. Same surface. 4 tests.
+  - Both judge in-process and are verified against the embedded engine (a cloud-metadata SSRF →
+    `block`/`DenyEgress`; an SDK-authored ACL rule firing at `tier=Rules`). The PyPI/npm publish
+    workflows are rebuilt for native artifacts (maturin wheels / napi binaries).
+
 ## [0.5.2] — Python + TypeScript SDKs; the policy language is ACL
 
 ### Added

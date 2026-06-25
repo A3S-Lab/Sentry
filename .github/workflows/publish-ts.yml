@@ -35,6 +35,8 @@ jobs:
       - run: npm install
       - run: npm run build -- --target ${{ matrix.settings.target }}
       - run: npm test
+        if: runner.os != 'Windows' # the suite uses a unix mock-agent .sh + unix-absolute paths
+
       - uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}

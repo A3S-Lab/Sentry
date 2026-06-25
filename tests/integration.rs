@@ -201,3 +201,57 @@ fn l2_llm_round_trip_via_mock_endpoint() {
         "should carry the model's reason: {stdout}"
     );
 }
+
+// Replicas of a3s-observer's deny-file parsers — the cross-tool contract sentry must satisfy:
+//   egress: observer src/policy.rs `parse_egress_policy` (trim, skip #/blank, parse Ipv4Addr)
+//   file/exec: observer a3s-observer-collector/src/bin/fileguard.rs `load_policy` (trim, skip #/blank)
+fn observer_parse_egress_ips(body: &str) -> Vec<std::net::Ipv4Addr> {
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.parse().ok())
+        .collect()
+}
+fn observer_load_paths(body: &str) -> Vec<String> {
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
+        .collect()
+}
+
+#[test]
+fn deny_files_are_consumable_by_observer_guards() {
+    let dir = tmp("chain");
+    let pol = dir.join("p.hcl");
+    std::fs::write(
+        &pol,
+        r#"rules = [ { name = "block-key", on = "FileAccess", match = "id_rsa", verdict = "block", severity = "high", reason = "key", action = "deny-file" } ]"#,
+    )
+    .unwrap();
+    let egress = dir.join("egress-deny.txt");
+    let filed = dir.join("file-deny.txt");
+    // metadata egress (built-in cloud-metadata block → deny-egress) + an SSH key read (site rule → deny-file)
+    let input = "{\"event\":{\"Egress\":{\"pid\":1,\"peer\":\"169.254.169.254\",\"port\":80}}}\n\
+        {\"event\":{\"FileAccess\":{\"pid\":2,\"path\":\"/home/agent/.ssh/id_rsa\",\"write\":false}}}\n";
+    run(
+        &[
+            ("A3S_SENTRY_POLICY", pol.to_str().unwrap()),
+            ("A3S_SENTRY_EGRESS_DENY", egress.to_str().unwrap()),
+            ("A3S_SENTRY_FILE_DENY", filed.to_str().unwrap()),
+        ],
+        input,
+    );
+
+    // observer's enforce would load exactly the blocked metadata IP into DENY_EGRESS
+    assert_eq!(
+        observer_parse_egress_ips(&std::fs::read_to_string(&egress).unwrap()),
+        vec!["169.254.169.254".parse::<std::net::Ipv4Addr>().unwrap()],
+    );
+    // observer's fileguard would fanotify-mark exactly the blocked key path
+    assert_eq!(
+        observer_load_paths(&std::fs::read_to_string(&filed).unwrap()),
+        vec!["/home/agent/.ssh/id_rsa".to_string()],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

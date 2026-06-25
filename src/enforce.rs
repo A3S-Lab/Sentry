@@ -88,7 +88,10 @@ fn valid_target(action: &EnforceAction, t: &str) -> bool {
         return false;
     }
     match action {
-        EnforceAction::DenyEgress(_) => true, // IP / hostname — observer re-resolves hosts
+        // observer's egress guard is `connect4` + a u32 IPv4 map (hostnames are DNS-resolved to
+        // IPv4); an IPv6 *literal* (has ':') is unenforceable and would be mis-parsed as a hostname,
+        // so drop it rather than write a dead line. IPv4 + hostnames pass.
+        EnforceAction::DenyEgress(_) => !t.contains(':'),
         EnforceAction::DenyFile(_) | EnforceAction::DenyExec(_) => t.starts_with('/'),
     }
 }
@@ -202,6 +205,28 @@ mod tests {
             "1.2.3.4\n5.6.7.8\n9.9.9.9\n"
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drops_unenforceable_ipv6_egress_literal() {
+        let dir = std::env::temp_dir().join(format!("sentry-v6-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let egress = dir.join("e.txt");
+        let mut e = Enforcer::new(Some(egress.clone()), None, None, false);
+        // IPv4 enforces; the IPv6 literal is dropped (observer's connect4 egress guard is IPv4-only)
+        assert!(e
+            .apply(&EnforceAction::DenyEgress("169.254.169.254".into()))
+            .unwrap()
+            .is_some());
+        assert!(e
+            .apply(&EnforceAction::DenyEgress("fd00:ec2::254".into()))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            std::fs::read_to_string(&egress).unwrap(),
+            "169.254.169.254\n"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

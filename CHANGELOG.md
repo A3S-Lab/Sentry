@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.1] — observer chain contract: verified + a real fix
+
+### Fixed
+- **IPv6 egress denies were unenforceable + mis-parsed.** observer's egress guard is `connect4` + a
+  `u32` IPv4 map (hostnames DNS-resolved to IPv4), so an IPv6 *literal* (e.g. the v6 cloud-metadata
+  `fd00:ec2::254`) can't be enforced and observer would mis-parse it as a hostname. Sentry now drops
+  IPv6 egress literals instead of writing a dead line. (IPv4 + hostnames unchanged.)
+
+### Added
+- **Cross-tool contract test** (`deny_files_are_consumable_by_observer_guards`): runs a3s-observer's
+  *exact* deny-file parsers (`parse_egress_policy` + fileguard `load_policy`) on sentry's output and
+  asserts the blocked IP / path are extracted correctly — verifying the format contract that the
+  whole enforcement chain depends on, in CI.
+
 ## [0.3.0] — real L3 deep agent investigation
 
 ### Added

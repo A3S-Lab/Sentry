@@ -1,7 +1,9 @@
 name: publish-python
 
-# Publish the native PyO3 Python SDK to PyPI on a `python-vX.Y.Z` tag (independent of the daemon's
-# `v*` tags). Builds an abi3 wheel per platform with maturin. Requires a `PYPI_API_TOKEN` secret.
+# Publish the native PyO3 Python SDK on a `python-vX.Y.Z` tag (independent of the daemon's `v*` tags).
+# Builds an abi3 wheel per platform with maturin, then ships them BOTH ways:
+#   - PyPI (`pip install a3s-sentry`) — needs a `PYPI_API_TOKEN` secret; skipped gracefully if unset.
+#   - GitHub Release — always, via the built-in GITHUB_TOKEN (a token-free fallback, like a3s-code).
 on:
   push:
     tags: ["python-v*"]
@@ -31,14 +33,26 @@ jobs:
   publish:
     needs: wheels
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create / upload the GitHub Release
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - uses: PyO3/maturin-action@v1
-        with:
-          command: upload
-          args: --skip-existing dist/*
+      - name: PyPI (skipped if PYPI_API_TOKEN is unset)
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$MATURIN_PYPI_TOKEN" ]; then
+            pip install maturin
+            maturin upload --skip-existing dist/*
+          else
+            echo "PYPI_API_TOKEN not set — skipping PyPI; wheels still ship to the GitHub Release."
+          fi
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Python SDK $GITHUB_REF_NAME" --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber

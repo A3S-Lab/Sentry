@@ -177,6 +177,18 @@ SSH client… key material can be transmitted outbound after being loaded into m
 | `A3S_SENTRY_AGENT_TIMEOUT` | L3 investigation timeout in seconds (default 120) |
 | `A3S_SENTRY_WORKERS` / `_QUEUE` | L2/L3 worker threads (default 4) + escalation queue depth (default 256) |
 | `A3S_SENTRY_DRY_RUN` | judge + audit, never write a deny-file |
+| `A3S_SENTRY_METRICS_ADDR` | serve Prometheus `/metrics` + `/healthz` on this `ip:port` (e.g. `0.0.0.0:9100`; off by default) |
+
+## Observability
+
+Set `A3S_SENTRY_METRICS_ADDR` (e.g. `0.0.0.0:9100`) to expose, with no extra dependency:
+
+- **`GET /metrics`** — Prometheus counters: `sentry_events_total`, `sentry_blocked_total`,
+  **`sentry_overload_degraded_total`** (escalations that fell through to the fail mode), and
+  **`sentry_enforce_failed_total`** (a block whose deny-write errored). For a *fail-open* control those
+  last two are the ones to **alarm on** — both mean a block did **not** take effect.
+- **`GET /healthz`** — `200 ok` while the process is alive (the k8s liveness/readiness probe in
+  [`deploy/daemonset.yaml`](deploy/daemonset.yaml) hits this).
 
 ## Honest boundaries
 
@@ -215,11 +227,13 @@ cargo build --release
 
 Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those live in a3s-observer.
 
-- **Unit** (39) — rules + escalation + enforce + parsing + the speculative/hot-reload/cap logic.
-- **Integration** (`tests/integration.rs`, 11) — the real binary end to end: block → deny-file,
+- **Unit** (41) — rules + escalation + enforce + parsing + the speculative/hot-reload/cap logic + the
+  metrics endpoint.
+- **Integration** (`tests/integration.rs`, 12) — the real binary end to end: block → deny-file,
   dry-run, fail-open/closed, malformed-input, live hot-reload, `--version`, the **L2 round-trip**
-  against a mock OpenAI endpoint, the **L3 agent** path (mock agent → block → deny-file), and
-  **overload degradation** (slow L3 + queue=1 → graceful degrade, clean exit). All CI-reproducible.
+  against a mock OpenAI endpoint, the **L3 agent** path (mock agent → block → deny-file), **overload
+  degradation** (slow L3 + queue=1 → graceful degrade, clean exit), and the **metrics endpoint**
+  (live `/metrics` counters + `/healthz`). All CI-reproducible.
 - **Soak** (`scripts/soak.sh` + `scripts/soak-l2.sh`) — sustained mixed load + policy-rewrite-under-load
   (10M+ events, RSS flat, 0 panics, dedup-bounded); and a **worker-pool soak** proving a slow L2 never
   head-of-line-blocks the L1 stream (**~1.15M ev/s on Linux with a 0.5s L2**, RSS flat 6.5 MB, graceful
@@ -246,6 +260,7 @@ Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those
 | `agent.rs` | **L3** a3s-code investigator |
 | `pipeline.rs` | the `Judge` trait + L1→L2→L3 escalation |
 | `enforce.rs` | append blocks to observer deny-files |
+| `metrics.rs` | Prometheus `/metrics` + `/healthz` endpoint |
 | `bin/sentry.rs` | the daemon (stdin → judge → enforce → audit) |
 | `deploy/daemonset.yaml` | reference k8s DaemonSet (observer → sentry → guards) |
 | `.github/workflows/ci.yml` | CI: fmt + clippy + full test suite |

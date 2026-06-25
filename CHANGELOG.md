@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.0] — self-observability (metrics + health)
+
+GA item (i): a *fail-open* security control has to be alertable — otherwise a silent enforcement
+bypass under load looks identical to a quiet day. Added a std-only metrics/health endpoint (opt-in
+`A3S_SENTRY_METRICS_ADDR`, e.g. `0.0.0.0:9100`; off by default) — **no new dependency**, one accept
+thread:
+
+- **`GET /metrics`** — Prometheus counters: `sentry_events_total`, `sentry_blocked_total`,
+  `sentry_overload_degraded_total`, and a new **`sentry_enforce_failed_total`** (a block whose
+  deny-write errored). The last two are the ones to alarm on — both mean a block did **not** land.
+- **`GET /healthz`** — `200 ok` while alive. The reference k8s DaemonSet now has liveness/readiness
+  probes against it, a `metrics` containerPort, and `prometheus.io/scrape` annotations.
+- The counters are shared atomics across the ingest thread + workers (the daemon's loose
+  `blocked`/`degraded` atomics are now one `Metrics`); the endpoint bind fails fast on a bad address.
+
+### Tested
+- Unit: the served endpoint over a real TCP round-trip (routing + counter values) + the Prometheus
+  formatting. Integration: the daemon serves **live** counters end to end (an SSRF block →
+  `sentry_blocked_total 1`, `/healthz` → 200). 41 unit + 12 integration, fmt + clippy clean.
+
 ## [0.4.2] — L3 subprocess lifecycle hardening
 
 An adversarial security review of the post-v0.1.0 code — the worker pool, the overload fail-mode, and

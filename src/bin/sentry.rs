@@ -12,13 +12,13 @@
 //! Config is all env (see `--help`): policy file, L2/L3 backends, deny-file sinks, fail mode.
 
 use a3s_sentry::{
-    AgentJudge, Decision, Enforcer, LiveRules, LlmJudge, ObservedEvent, Pipeline, Severity, Tier,
-    Verdict,
+    AgentJudge, Decision, Enforcer, LiveRules, LlmJudge, Metrics, ObservedEvent, Pipeline,
+    Severity, Tier, Verdict,
 };
 use serde::Serialize;
 use std::io::{BufRead, Read};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -39,6 +39,15 @@ fn main() -> anyhow::Result<()> {
     let live = Arc::new(LiveRules::new(cfg.policy_path.clone())?);
     let pipeline = Arc::new(cfg.build_pipeline(live.clone())?);
     let enforcer = Arc::new(Mutex::new(cfg.build_enforcer()));
+
+    // Self-observability (opt-in). Alarm on `overload_degraded`/`enforce_failed` — both mean a block
+    // didn't take effect. Bind fails fast on a bad address rather than silently running blind.
+    let metrics = Metrics::default();
+    if let Some(addr) = &cfg.metrics_addr {
+        let bound = a3s_sentry::metrics::serve(addr, metrics.clone())
+            .map_err(|e| anyhow::anyhow!("binding metrics endpoint {addr}: {e}"))?;
+        eprintln!("a3s-sentry: metrics at http://{bound}/metrics, liveness at /healthz");
+    }
 
     eprintln!(
         "a3s-sentry {}: L1={} rules L2={} L3={} fail={} speculate={} dry_run={} — reading observer NDJSON on stdin",
@@ -81,17 +90,15 @@ fn main() -> anyhow::Result<()> {
     // Worker pool for the SLOW tiers. L1 runs inline on the ingest thread (µs), so a slow L2/L3
     // occupies a worker — not the event stream. Escalations dispatch to a bounded queue; if it fills
     // (an escalation flood), the event degrades gracefully to the fail-open/closed verdict.
-    let blocked = Arc::new(AtomicU64::new(0));
-    let degraded = Arc::new(AtomicU64::new(0));
     let (tx, rx) = mpsc::sync_channel::<ObservedEvent>(cfg.queue_cap);
     let rx = Arc::new(Mutex::new(rx));
     let mut workers = Vec::new();
     for _ in 0..cfg.workers {
-        let (pipeline, enforcer, rx, blocked) = (
+        let (pipeline, enforcer, rx, metrics) = (
             pipeline.clone(),
             enforcer.clone(),
             rx.clone(),
-            blocked.clone(),
+            metrics.clone(),
         );
         workers.push(std::thread::spawn(move || loop {
             let ev = match rx.lock().unwrap().recv() {
@@ -101,7 +108,7 @@ fn main() -> anyhow::Result<()> {
             // re-run the full pipeline (L1 in µs, then L2/L3) on the escalated event
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pipeline.evaluate(&ev)))
             {
-                Ok(d) => handle(&ev, &d, &enforcer, &blocked),
+                Ok(d) => handle(&ev, &d, &enforcer, &metrics),
                 Err(_) => eprintln!("a3s-sentry: a judge panicked on an escalated event — skipped"),
             }
         }));
@@ -109,7 +116,6 @@ fn main() -> anyhow::Result<()> {
 
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
-    let mut total = 0u64;
 
     // Bounded line reader: observer events are small, so cap each read — a pathological unbounded
     // line can't amplify memory (an oversize line fragments into capped chunks that fail to parse).
@@ -126,7 +132,7 @@ fn main() -> anyhow::Result<()> {
         let Some(ev) = ObservedEvent::parse(&line) else {
             continue;
         };
-        total += 1;
+        let total = metrics.events.fetch_add(1, Ordering::Relaxed) + 1;
         // L1 inline — fast, can't head-of-line-block the stream; panic-contained per event.
         let d1 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pipeline.classify_l1(&ev)
@@ -141,19 +147,19 @@ fn main() -> anyhow::Result<()> {
             // hand the slow L2/L3 work to a worker; on a full queue, degrade gracefully (fail mode)
             if let Err(e) = tx.try_send(ev) {
                 let (mpsc::TrySendError::Full(ev) | mpsc::TrySendError::Disconnected(ev)) = e;
-                degraded.fetch_add(1, Ordering::Relaxed);
+                metrics.degraded.fetch_add(1, Ordering::Relaxed);
                 let d = pipeline.resolve_overload(d1);
-                handle(&ev, &d, &enforcer, &blocked);
+                handle(&ev, &d, &enforcer, &metrics);
             }
         } else {
-            handle(&ev, &d1, &enforcer, &blocked);
+            handle(&ev, &d1, &enforcer, &metrics);
         }
 
         if total.is_multiple_of(10_000) {
             eprintln!(
                 "a3s-sentry: {total} events, {} blocked, {} overload-degraded",
-                blocked.load(Ordering::Relaxed),
-                degraded.load(Ordering::Relaxed)
+                metrics.blocked.load(Ordering::Relaxed),
+                metrics.degraded.load(Ordering::Relaxed)
             );
         }
     }
@@ -163,19 +169,20 @@ fn main() -> anyhow::Result<()> {
         let _ = w.join();
     }
     eprintln!(
-        "a3s-sentry: stopped — {total} events, {} blocked, {} overload-degraded",
-        blocked.load(Ordering::Relaxed),
-        degraded.load(Ordering::Relaxed)
+        "a3s-sentry: stopped — {} events, {} blocked, {} overload-degraded",
+        metrics.events.load(Ordering::Relaxed),
+        metrics.blocked.load(Ordering::Relaxed),
+        metrics.degraded.load(Ordering::Relaxed)
     );
     Ok(())
 }
 
 /// Apply a decision: enforce a block via the shared enforcer and audit anything noteworthy. Shared
 /// by the ingest thread (L1 allow/block) and the workers (L2/L3 results), so it locks the enforcer.
-fn handle(ev: &ObservedEvent, d: &Decision, enforcer: &Mutex<Enforcer>, blocked: &AtomicU64) {
+fn handle(ev: &ObservedEvent, d: &Decision, enforcer: &Mutex<Enforcer>, m: &Metrics) {
     let mut enforced: Option<String> = None;
     if d.verdict == Verdict::Block {
-        blocked.fetch_add(1, Ordering::Relaxed);
+        m.blocked.fetch_add(1, Ordering::Relaxed);
         if let Some(action) = &d.action {
             // Recover a poisoned lock instead of unwrap-panicking: if one apply ever panicked while
             // holding the lock, a security control must keep enforcing for every other worker, not wedge.
@@ -186,7 +193,11 @@ fn handle(ev: &ObservedEvent, d: &Decision, enforcer: &Mutex<Enforcer>, blocked:
             {
                 Ok(Some(path)) => enforced = Some(path.display().to_string()),
                 Ok(None) => {}
-                Err(e) => eprintln!("a3s-sentry: enforce write failed: {e}"),
+                Err(e) => {
+                    // A block that didn't land. Count it so an operator can alarm — don't just log.
+                    m.enforce_failed.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("a3s-sentry: enforce write failed: {e}");
+                }
             }
         }
     }
@@ -234,6 +245,7 @@ struct Config {
     workers: usize,
     queue_cap: usize,
     dry_run: bool,
+    metrics_addr: Option<String>,
 }
 
 impl Config {
@@ -270,6 +282,7 @@ impl Config {
                 .filter(|&n| n > 0)
                 .unwrap_or(256),
             dry_run: env("A3S_SENTRY_DRY_RUN").is_some(),
+            metrics_addr: env("A3S_SENTRY_METRICS_ADDR"),
         }
     }
 
@@ -351,6 +364,7 @@ Env config:
   A3S_SENTRY_WORKERS=<n>          L2/L3 worker threads off the ingest thread (default 4)
   A3S_SENTRY_QUEUE=<n>            escalation queue depth (default 256; full → graceful fail-mode)
   A3S_SENTRY_DRY_RUN=1            judge + audit, but never write a deny-file
+  A3S_SENTRY_METRICS_ADDR=<ip:port> serve Prometheus /metrics + /healthz (e.g. 0.0.0.0:9100; off by default)
 
 The policy file is hot-reloaded: rewrite it from any program (or your config system) and the rules
 update live within ~2s, no restart. A parse error keeps the current rules.

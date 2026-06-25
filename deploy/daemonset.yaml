@@ -17,6 +17,10 @@ spec:
   template:
     metadata:
       labels: { app: a3s-sentry }
+      annotations: # scrape sentry's own metrics (overload_degraded / enforce_failed = block didn't land)
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
     spec:
       hostPID: true
       priorityClassName: system-node-critical
@@ -40,11 +44,21 @@ spec:
               A3S_SENTRY_EGRESS_DENY=/deny/egress.txt
               A3S_SENTRY_FILE_DENY=/deny/file.txt A3S_SENTRY_EXEC_DENY=/deny/exec.txt
               A3S_SENTRY_LLM_URL="$LLM_URL" A3S_SENTRY_LLM_KEY="$LLM_KEY"
+              A3S_SENTRY_METRICS_ADDR=0.0.0.0:9100
               A3S_SENTRY_DRY_RUN=1
               a3s-sentry
           env:
             - { name: LLM_URL, valueFrom: { secretKeyRef: { name: a3s-sentry-llm, key: url } } }
             - { name: LLM_KEY, valueFrom: { secretKeyRef: { name: a3s-sentry-llm, key: key } } }
+          ports:
+            - { name: metrics, containerPort: 9100 }
+          livenessProbe: # the daemon's metrics thread answers /healthz while the process is alive
+            httpGet: { path: /healthz, port: 9100 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9100 }
+            periodSeconds: 15
           volumeMounts:
             - { name: deny, mountPath: /deny }
             - { name: policy, mountPath: /etc/sentry }

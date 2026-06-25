@@ -204,6 +204,63 @@ fn overload_degrades_under_slow_l3_and_tiny_queue() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Observability end to end: with A3S_SENTRY_METRICS_ADDR set, the daemon serves live counters — an
+/// SSRF block shows up as sentry_blocked_total, and /healthz answers 200.
+#[test]
+fn metrics_endpoint_serves_live_counters() {
+    use std::io::Read as _;
+    // claim a free port, then let the daemon rebind it (localhost test — TOCTOU is acceptable here)
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+    let dir = tmp("metrics");
+    let deny = dir.join("egress-deny.txt");
+    let mut child = Command::new(BIN)
+        .env("A3S_SENTRY_METRICS_ADDR", &addr)
+        .env("A3S_SENTRY_EGRESS_DENY", deny.to_str().unwrap())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(SSRF.as_bytes()).unwrap(); // one block; keep stdin OPEN so the daemon stays up
+    stdin.flush().unwrap();
+
+    let probe = |path: &str| -> String {
+        let mut s = std::net::TcpStream::connect(&addr).expect("connect metrics");
+        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut r = String::new();
+        let _ = s.read_to_string(&mut r); // Connection: close → read to EOF
+        r
+    };
+    // poll until the block is counted (covers daemon startup + ingest timing)
+    let mut metrics = String::new();
+    for _ in 0..40 {
+        if let Ok(()) = std::net::TcpStream::connect(&addr).map(drop) {
+            metrics = probe("/metrics");
+            if metrics.contains("sentry_blocked_total 1") {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        metrics.contains("sentry_blocked_total 1"),
+        "one SSRF block should be counted: {metrics}"
+    );
+    assert!(metrics.contains("sentry_events_total 1"));
+    assert!(probe("/healthz").contains("200 OK"), "liveness up");
+
+    drop(stdin); // EOF → daemon drains + exits
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn version_flag_prints_version() {
     let out = Command::new(BIN).arg("--version").output().unwrap();

@@ -33,7 +33,8 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "test": "node --test test/*.test.mjs",
-    "soak": "node --expose-gc soak.mjs"
+    "soak": "node --expose-gc soak.mjs",
+    "coverage": "bash coverage.sh"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2"

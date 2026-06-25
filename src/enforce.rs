@@ -29,12 +29,18 @@ impl Enforcer {
         exec_deny: Option<PathBuf>,
         dry_run: bool,
     ) -> Self {
+        // Seed dedup from the existing deny-files so a restart doesn't re-append what's already
+        // denied (the files persist; the in-memory set otherwise wouldn't know about them).
+        let mut seen = HashSet::new();
+        seed_seen(&mut seen, "egress", &egress_deny);
+        seed_seen(&mut seen, "file", &file_deny);
+        seed_seen(&mut seen, "exec", &exec_deny);
         Self {
             egress_deny,
             file_deny,
             exec_deny,
             dry_run,
-            seen: HashSet::new(),
+            seen,
         }
     }
 
@@ -55,7 +61,12 @@ impl Enforcer {
             return Ok(None);
         }
         // Dedup across the whole kind+target so we don't grow the deny-file unboundedly under a
-        // repeating attack.
+        // repeating attack. Cap the set so a *rotating*-target flood can't grow it without bound —
+        // the only cost of forgetting an entry is re-appending one duplicate line (which the guards,
+        // and our own seeding, tolerate). ponytail: crude clear-at-cap, LRU if it ever matters.
+        if self.seen.len() >= 100_000 {
+            self.seen.clear();
+        }
         let key = format!("{}\0{}", kind_tag(action), target);
         if !self.seen.insert(key) {
             return Ok(None);
@@ -87,6 +98,20 @@ fn kind_tag(a: &EnforceAction) -> &'static str {
         EnforceAction::DenyEgress(_) => "egress",
         EnforceAction::DenyFile(_) => "file",
         EnforceAction::DenyExec(_) => "exec",
+    }
+}
+
+/// Prime the dedup set with the entries already in a deny-file (one target per line).
+fn seed_seen(seen: &mut HashSet<String>, tag: &str, path: &Option<PathBuf>) {
+    if let Some(p) = path {
+        if let Ok(content) = std::fs::read_to_string(p) {
+            for line in content.lines() {
+                let t = line.trim();
+                if !t.is_empty() {
+                    seen.insert(format!("{tag}\0{t}"));
+                }
+            }
+        }
     }
 }
 
@@ -152,6 +177,31 @@ mod tests {
 
         assert!(!egress.exists(), "no egress line written");
         assert_eq!(std::fs::read_to_string(&exec).unwrap(), "/tmp/payload\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn seeds_dedup_from_existing_deny_file_across_restart() {
+        let dir = std::env::temp_dir().join(format!("sentry-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let egress = dir.join("egress-deny.txt");
+        std::fs::write(&egress, "1.2.3.4\n5.6.7.8\n").unwrap();
+
+        // a "restarted" enforcer pointed at the existing file knows those entries already
+        let mut e = Enforcer::new(Some(egress.clone()), None, None, false);
+        assert!(e
+            .apply(&EnforceAction::DenyEgress("1.2.3.4".into()))
+            .unwrap()
+            .is_none());
+        assert!(e
+            .apply(&EnforceAction::DenyEgress("9.9.9.9".into()))
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            std::fs::read_to_string(&egress).unwrap(),
+            "1.2.3.4\n5.6.7.8\n9.9.9.9\n"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.1] — hardening + full test pyramid
+
+### Added
+- **Integration suite** (`tests/integration.rs`) driving the real binary: block → deny-file write,
+  dry-run, fail-open vs fail-closed, malformed-input skipping, live hot-reload, `--version`.
+- **Soak harness** (`scripts/soak.sh`): sustained mixed load (benign / block / escalate / rotating
+  egress / malformed) + a policy rewrite under load. Validated: 10M+ events at ~350k–850k ev/s, RSS
+  flat (no leak), deny-file bounded by dedup, 0 panics, clean shutdown.
+
+### Hardened
+- **Bounded stdin reader** — each line read is capped, so a pathological unbounded input line can't
+  amplify memory.
+- **Enforcer dedup** is now **seeded from existing deny-files** on startup (a restart no longer
+  re-appends what's already denied) and **capped** (a rotating-target flood can't grow the set
+  without bound — worst case is re-appending one duplicate the guards tolerate).
+
 ## [0.2.0] — dynamic config + speculative parallelism
 
 ### Added

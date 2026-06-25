@@ -16,7 +16,7 @@ use a3s_sentry::{
     Verdict,
 };
 use serde::Serialize;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,12 +78,23 @@ fn main() -> anyhow::Result<()> {
     }
 
     let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let (mut total, mut blocked) = (0u64, 0u64);
 
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    // Bounded line reader: observer events are small, so cap each read — a pathological unbounded
+    // line can't amplify memory (an oversize line fragments into capped chunks that fail to parse).
+    const MAX_LINE: u64 = 256 * 1024;
+    let mut buf = Vec::with_capacity(8192);
+    loop {
+        buf.clear();
+        match (&mut reader).take(MAX_LINE).read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let line = String::from_utf8_lossy(&buf);
         let Some(ev) = ObservedEvent::parse(&line) else {
             continue;
         };

@@ -164,11 +164,19 @@ the cost of always running L3 for them (the speculation trade).
 ## Build & test
 
 ```bash
-cargo test            # L1 rules, escalation, enforce, parsing — all host-unit-tested
+cargo test                          # unit + integration
 cargo build --release
+./scripts/soak.sh ./target/release/sentry 30   # sustained-load soak
 ```
 
 Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those live in a3s-observer.
+
+- **Unit** (34) — rules + escalation + enforce + parsing + the speculative/hot-reload logic.
+- **Integration** (`tests/integration.rs`) — the real binary end to end: block → deny-file, dry-run,
+  fail-open/closed, malformed-input, live hot-reload, `--version`.
+- **Soak** (`scripts/soak.sh`) — sustained mixed load + a policy rewrite under load, with RSS /
+  throughput / leak checks. Last run: **10M+ events at ~350k–850k ev/s, RSS flat, 0 panics**, deny-file
+  bounded by dedup.
 
 ## Layout
 

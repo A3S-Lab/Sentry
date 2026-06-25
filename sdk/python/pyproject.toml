@@ -1,0 +1,18 @@
+[project]
+name = "a3s-sentry"
+version = "0.1.0"
+description = "Python SDK for a3s-sentry — author ACL policy, run the judge, stream typed decisions."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/A3S-Lab/Sentry"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["a3s_sentry"]

@@ -1,8 +1,8 @@
-# a3s-sentry — L1 site policy (HCL).
+# a3s-sentry — L1 site policy (ACL).
 #
 # These rules are evaluated BEFORE the built-in defaults, so an earlier match here overrides a
 # built-in rule. First match wins; no match = allow. Rules are compiled at daemon startup (a bad
-# regex fails the load loudly). Point the daemon at this file with A3S_SENTRY_POLICY=policy/rules.hcl.
+# regex fails the load loudly). Point the daemon at this file with A3S_SENTRY_POLICY=policy/rules.acl.
 #
 # Each rule:
 #   name     identifier (shows up in the audit reason)

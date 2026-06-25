@@ -28,7 +28,7 @@ spec:
         - name: deny # deny-files: sentry writes, the guards read (one node-local scratch dir)
           emptyDir: {}
         - name: policy
-          configMap: { name: a3s-sentry-policy } # rules.hcl — hot-reloaded if you update it
+          configMap: { name: a3s-sentry-policy } # rules.acl — hot-reloaded if you update it
         - name: cgroup
           hostPath: { path: /sys/fs/cgroup }
       containers:
@@ -44,7 +44,7 @@ spec:
           args:
             - >
               A3S_OBSERVER_JSON=1 A3S_OBSERVER_SSL=1 a3s-observer-collector |
-              A3S_SENTRY_POLICY=/etc/sentry/rules.hcl
+              A3S_SENTRY_POLICY=/etc/sentry/rules.acl
               A3S_SENTRY_EGRESS_DENY=/deny/egress.txt
               A3S_SENTRY_FILE_DENY=/deny/file.txt A3S_SENTRY_EXEC_DENY=/deny/exec.txt
               A3S_SENTRY_LLM_URL="$LLM_URL" A3S_SENTRY_LLM_KEY="$LLM_KEY"

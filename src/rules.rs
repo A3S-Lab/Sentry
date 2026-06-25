@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 use std::time::SystemTime;
 
-/// One L1 rule. Loaded from HCL; see `default_rules` for the built-in starter set.
+/// One L1 rule. Loaded from ACL; see `default_rules` for the built-in starter set.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleSpec {
     pub name: String,
@@ -31,7 +31,7 @@ pub struct RuleSpec {
     pub action: Option<String>,
 }
 
-/// HCL top-level: `rules = [ { ... }, ... ]`.
+/// ACL top-level: `rules = [ { ... }, ... ]`.
 #[derive(Debug, Deserialize)]
 struct Policy {
     #[serde(default)]
@@ -62,14 +62,14 @@ impl RuleEngine {
         Ok(Self { rules })
     }
 
-    /// The built-in starter rules plus any loaded from an HCL policy file (built-ins first, so a
+    /// The built-in starter rules plus any loaded from an ACL policy file (built-ins first, so a
     /// site policy's later rules can only add — to override, the site rule must come earlier; load
     /// order is policy-then-builtins if you pass `prepend`).
     pub fn with_defaults_and(policy_hcl: Option<&str>) -> anyhow::Result<Self> {
         let mut specs = Vec::new();
         if let Some(hcl) = policy_hcl {
             let policy: Policy =
-                hcl::from_str(hcl).map_err(|e| anyhow::anyhow!("parsing HCL policy: {e}"))?;
+                hcl::from_str(hcl).map_err(|e| anyhow::anyhow!("parsing ACL policy: {e}"))?;
             specs.extend(policy.rules);
         }
         specs.extend(default_rules());
@@ -122,7 +122,7 @@ impl Judge for RuleEngine {
 
 /// A hot-reloadable rule set: the live [`RuleEngine`] behind an `RwLock`, plus the policy file it was
 /// built from. Call [`reload_if_changed`](LiveRules::reload_if_changed) on a timer (the daemon does,
-/// every ~2s) and any program that rewrites the HCL policy is picked up live, no restart. A parse
+/// every ~2s) and any program that rewrites the ACL policy is picked up live, no restart. A parse
 /// error keeps the current rules — a bad edit never disarms the engine. Share it as `Arc<LiveRules>`:
 /// hand one clone to the pipeline (it's a [`Judge`]) and keep one for the reload loop.
 pub struct LiveRules {
@@ -132,7 +132,7 @@ pub struct LiveRules {
 }
 
 impl LiveRules {
-    /// Build from an optional HCL policy file (plus the built-in defaults).
+    /// Build from an optional ACL policy file (plus the built-in defaults).
     pub fn new(policy_path: Option<PathBuf>) -> anyhow::Result<Self> {
         let engine = build_engine(policy_path.as_deref())?;
         let mtime = policy_path.as_deref().and_then(mtime_of);
@@ -182,7 +182,7 @@ impl Judge for LiveRules {
     }
 }
 
-/// Read the HCL policy at `path` (if any) and build a `RuleEngine` with the built-in defaults.
+/// Read the ACL policy at `path` (if any) and build a `RuleEngine` with the built-in defaults.
 fn build_engine(path: Option<&Path>) -> anyhow::Result<RuleEngine> {
     let hcl = match path {
         Some(p) => Some(
@@ -199,7 +199,7 @@ fn mtime_of(path: &Path) -> Option<SystemTime> {
 }
 
 /// Built-in starter rules — a sane default so sentry is useful with no policy file. Sites extend or
-/// override these via an HCL policy. Deliberately conservative: only the unambiguous cases `block`,
+/// override these via an ACL policy. Deliberately conservative: only the unambiguous cases `block`,
 /// the rest `escalate` to the LLM/agent tiers rather than guess.
 pub fn default_rules() -> Vec<RuleSpec> {
     fn r(
@@ -455,7 +455,7 @@ mod tests {
     fn live_rules_reload_picks_up_new_policy() {
         let dir = std::env::temp_dir().join(format!("sentry-live-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("policy.hcl");
+        let path = dir.join("policy.acl");
         std::fs::write(&path, "rules = []\n").unwrap();
         let live = LiveRules::new(Some(path.clone())).unwrap();
 

@@ -348,7 +348,7 @@ Reads a3s-observer NDJSON on stdin, judges each event, enforces blocks via obser
 and writes a decision audit (NDJSON) on stdout. Pipe it after a3s-observer-collector.
 
 Env config:
-  A3S_SENTRY_POLICY=<file.hcl>    extra L1 rules (HCL); built-ins always apply; HOT-RELOADED (~2s)
+  A3S_SENTRY_POLICY=<file.acl>    extra L1 rules (ACL); built-ins always apply; HOT-RELOADED (~2s)
   A3S_SENTRY_LLM_URL=<base/v1>    enable L2; OpenAI-compatible chat endpoint
   A3S_SENTRY_LLM_MODEL=<name>     L2 model (default: \"default\")
   A3S_SENTRY_LLM_KEY=<key>        L2 bearer token (optional)

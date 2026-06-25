@@ -17,7 +17,7 @@ The three tiers trade cost for depth, so expensive judgment runs only on what ch
 
 | tier | mechanism | latency | runs on |
 |---|---|---|---|
-| **L1** | deterministic regex rule engine (HCL-configurable) | µs | every event |
+| **L1** | deterministic regex rule engine (ACL-configurable) | µs | every event |
 | **L2** | a fast LLM classifier (OpenAI-compatible endpoint) | ~100s ms | events L1 escalates |
 | **L3** | a deep [a3s-code](https://github.com/AI45Lab/Code) agent with security skills | seconds–minutes | events L2 escalates |
 
@@ -103,8 +103,8 @@ before exiting. (No signal-handling dependency.)
 
 Ships a conservative built-in rule set (privesc, reverse shells, pipe-to-shell, disk overwrite,
 credential-file access, secret/injection markers in I/O, cloud-metadata SSRF). Only the unambiguous
-cases `block`; the rest `escalate` to L2/L3 rather than guess. Extend or override with an HCL policy
-(`A3S_SENTRY_POLICY=policy/rules.hcl`):
+cases `block`; the rest `escalate` to L2/L3 rather than guess. Extend or override with an ACL policy
+(`A3S_SENTRY_POLICY=policy/rules.acl`):
 
 ```hcl
 rules = [
@@ -113,14 +113,14 @@ rules = [
 ]
 ```
 
-First match wins; no match = allow. See [`policy/rules.hcl`](policy/rules.hcl).
+First match wins; no match = allow. See [`policy/rules.acl`](policy/rules.acl).
 
 ## Dynamic policy & embedding
 
 **Hot-reload.** The policy file is watched — rewrite it from any program (a controller, your config
 system, an operator) and the rules update **live within ~2s, no restart**. A parse error keeps the
 current rules, so a bad edit never disarms the engine. This is the language-agnostic way to drive
-sentry dynamically: your logic, in any language, rewrites the HCL.
+sentry dynamically: your logic, in any language, rewrites the ACL.
 
 **Embed it.** sentry is a library — build the pipeline in-process and apply config changes at runtime:
 
@@ -128,7 +128,7 @@ sentry dynamically: your logic, in any language, rewrites the HCL.
 use a3s_sentry::{LiveRules, LlmJudge, Pipeline, Severity};
 use std::{sync::Arc, time::Duration};
 
-let rules = Arc::new(LiveRules::new(Some("rules.hcl".into()))?);   // hot-reloadable
+let rules = Arc::new(LiveRules::new(Some("rules.acl".into()))?);   // hot-reloadable
 let pipeline = Pipeline::new(rules.clone())                        // L1
     .with_l2(Arc::new(LlmJudge::new("http://llm:18051/v1", "glm", None, Duration::from_secs(10))))
     .speculate_above(Some(Severity::High))   // run L2 + L3 in parallel on high-risk
@@ -140,6 +140,42 @@ rules.reload()?;   // force-apply config changes now (e.g. on a signal / admin A
 
 Every tier is a `Judge` trait impl, so you can swap L1/L2/L3 for your own (a different model, an
 in-house ruleset) and keep the escalation machinery.
+
+## SDKs (Python · TypeScript)
+
+Drive sentry from your own code — author ACL policy, run the judge, submit events, stream typed
+decisions, read metrics — instead of wiring stdin/stdout by hand. Both are dependency-free and mirror
+the same model; each is contract-tested against the real binary (an SSRF event round-trips to a
+`block`, and an SDK-authored ACL rule fires through the daemon's own parser).
+
+- **Python** — [`sdk/python`](sdk/python) (`pip install a3s-sentry`), async:
+
+  ```python
+  from a3s_sentry import Sentry, SentryConfig, Event, Policy, Rule, Verdict, Severity, Action
+
+  Policy([Rule("no-netcat", "ToolExec", r"(?i)\b(ncat|netcat)\b",
+               Verdict.BLOCK, Severity.MEDIUM, "netcat", Action.DENY_EXEC)]).write("rules.acl")
+
+  async with Sentry(SentryConfig(policy="rules.acl", egress_deny="egress.txt")) as s:
+      await s.submit(Event.egress(1, "169.254.169.254", 80))      # cloud-metadata SSRF
+      async for audit in s.decisions():
+          print(audit.decision.verdict, audit.subject); break
+  ```
+
+- **TypeScript** — [`sdk/typescript`](sdk/typescript) (`@a3s-lab/sentry`), Node 18+:
+
+  ```ts
+  import { Sentry, Policy, Event } from "@a3s-lab/sentry";
+
+  new Policy([{ name: "no-netcat", on: "ToolExec", match: "(?i)\\b(ncat|netcat)\\b",
+                verdict: "block", severity: "medium", reason: "netcat", action: "deny-exec" }])
+    .write("rules.acl");
+
+  const s = new Sentry({ policy: "rules.acl", egressDeny: "egress.txt" });
+  await s.start();
+  await s.submit(Event.egress(1, "169.254.169.254", 80));
+  for await (const audit of s.decisions()) { console.log(audit.decision.verdict, audit.subject); break; }
+  ```
 
 ## Speculative parallelism
 
@@ -176,7 +212,7 @@ SSH client… key material can be transmitted outbound after being loaded into m
 
 | var | effect |
 |---|---|
-| `A3S_SENTRY_POLICY` | extra L1 rules (HCL); built-ins always apply; **hot-reloaded** (~2s) |
+| `A3S_SENTRY_POLICY` | extra L1 rules (ACL); built-ins always apply; **hot-reloaded** (~2s) |
 | `A3S_SENTRY_LLM_URL` | enable L2; OpenAI-compatible chat base URL (`…/v1`) |
 | `A3S_SENTRY_LLM_MODEL` / `_KEY` | L2 model name / bearer token |
 | `A3S_SENTRY_AGENT_BIN` | enable L3; the agent command (e.g. `scripts/l3-agent.mjs`) |

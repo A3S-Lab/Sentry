@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.2] — Python + TypeScript SDKs; the policy language is ACL
+
+### Added
+- **Python SDK** ([`sdk/python`](sdk/python), `a3s-sentry`) and **TypeScript SDK**
+  ([`sdk/typescript`](sdk/typescript), `@a3s-lab/sentry`) — dependency-free clients that author ACL
+  policy in code, supervise the daemon, submit events, stream typed decisions, and read `/metrics` +
+  `/healthz`. Both mirror the same model and are **contract-tested against the real binary**: an SSRF
+  event round-trips to a `block`, and an SDK-authored ACL rule fires through the daemon's own parser.
+  Python: 13 tests (3 integration); TypeScript: 14 tests (1 integration).
+
+### Changed
+- **The policy language is now ACL** (the a3s config language), extension `.acl` —
+  `policy/rules.acl`, `A3S_SENTRY_POLICY=…/rules.acl`. Naming + extension only: the syntax is
+  unchanged (the ordered `rules = [ … ]` list, parsed by the same grammar, preserving first-match-wins
+  order), so existing policies keep working — just point the daemon at a `.acl` file.
+
 ## [0.5.1] — release pipeline, container image, operator runbook
 
 GA items (ii)/(iii)/(iv) — make sentry installable, deployable, and operable. No crate code change;

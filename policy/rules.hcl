@@ -1,0 +1,47 @@
+# a3s-sentry — L1 site policy (HCL).
+#
+# These rules are evaluated BEFORE the built-in defaults, so an earlier match here overrides a
+# built-in rule. First match wins; no match = allow. Rules are compiled at daemon startup (a bad
+# regex fails the load loudly). Point the daemon at this file with A3S_SENTRY_POLICY=policy/rules.hcl.
+#
+# Each rule:
+#   name     identifier (shows up in the audit reason)
+#   on       event kind to match, or "*" for any: ToolExec | SslContent | SecurityAction | Egress | Dns | FileAccess
+#   match    regex tested against the event subject (use (?i) for case-insensitive)
+#   verdict  allow | block | escalate          (escalate hands off to L2, then L3)
+#   severity info | low | medium | high | critical
+#   action   deny-egress | deny-file | deny-exec   (optional; applied to observer's deny-file on block)
+
+rules = [
+  # Hard-block a tool you never want an agent to run, and push the binary to observer's exec deny.
+  {
+    name     = "no-netcat"
+    on       = "ToolExec"
+    match    = "(?i)\\b(ncat|netcat)\\b"
+    verdict  = "block"
+    severity = "medium"
+    reason   = "netcat invocation"
+    action   = "deny-exec"
+  },
+
+  # Treat egress to an internal admin subnet as worth a deeper look rather than allowing outright.
+  {
+    name     = "internal-admin-egress"
+    on       = "Egress"
+    match    = "^10\\.0\\.99\\."
+    verdict  = "escalate"
+    severity = "medium"
+    reason   = "connection into the admin subnet"
+  },
+
+  # Block writes that look like persistence (cron / systemd / shell rc).
+  {
+    name     = "persistence-write"
+    on       = "FileAccess"
+    match    = "(/etc/cron|/etc/systemd/system/|\\.bashrc|\\.profile|/etc/rc\\.local)"
+    verdict  = "escalate"
+    severity = "high"
+    reason   = "write to a persistence location"
+    action   = "deny-file"
+  },
+]

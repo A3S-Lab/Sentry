@@ -1,0 +1,22 @@
+[package]
+name = "a3s-sentry"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Tiered (L1 rules / L2 LLM / L3 agent) runtime security control for AI agents, built on a3s-observer."
+repository = "https://github.com/A3S-Lab/Sentry"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+ureq = { version = "2", features = ["json"] }
+hcl-rs = "0.18"
+anyhow = "1"
+
+[[bin]]
+name = "sentry"
+path = "src/bin/sentry.rs"
+
+[profile.release]
+strip = true

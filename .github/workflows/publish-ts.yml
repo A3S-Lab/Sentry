@@ -30,7 +30,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - uses: dtolnay/rust-toolchain@stable
-        with: { targets: ${{ matrix.settings.target }} }
+        with:
+          targets: ${{ matrix.settings.target }}
       - run: npm install
       - run: npm run build -- --target ${{ matrix.settings.target }}
       - run: npm test
@@ -42,6 +43,10 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # NODE_AUTH_TOKEN applies to ALL steps: `napi prepublish` publishes the per-platform packages and
+    # `npm publish` the main one — both need the token.
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }
@@ -56,5 +61,3 @@ jobs:
       - run: npx napi artifacts --dir artifacts
       - run: npx napi prepublish -t npm
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

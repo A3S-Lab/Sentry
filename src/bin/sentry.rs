@@ -16,9 +16,10 @@ use a3s_sentry::{
     Verdict,
 };
 use serde::Serialize;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Read};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
@@ -36,8 +37,8 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = Config::from_env();
     let live = Arc::new(LiveRules::new(cfg.policy_path.clone())?);
-    let pipeline = cfg.build_pipeline(live.clone())?;
-    let mut enforcer = cfg.build_enforcer();
+    let pipeline = Arc::new(cfg.build_pipeline(live.clone())?);
+    let enforcer = Arc::new(Mutex::new(cfg.build_enforcer()));
 
     eprintln!(
         "a3s-sentry {}: L1={} rules L2={} L3={} fail={} speculate={} dry_run={} — reading observer NDJSON on stdin",
@@ -77,11 +78,38 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Worker pool for the SLOW tiers. L1 runs inline on the ingest thread (µs), so a slow L2/L3
+    // occupies a worker — not the event stream. Escalations dispatch to a bounded queue; if it fills
+    // (an escalation flood), the event degrades gracefully to the fail-open/closed verdict.
+    let blocked = Arc::new(AtomicU64::new(0));
+    let degraded = Arc::new(AtomicU64::new(0));
+    let (tx, rx) = mpsc::sync_channel::<ObservedEvent>(cfg.queue_cap);
+    let rx = Arc::new(Mutex::new(rx));
+    let mut workers = Vec::new();
+    for _ in 0..cfg.workers {
+        let (pipeline, enforcer, rx, blocked) = (
+            pipeline.clone(),
+            enforcer.clone(),
+            rx.clone(),
+            blocked.clone(),
+        );
+        workers.push(std::thread::spawn(move || loop {
+            let ev = match rx.lock().unwrap().recv() {
+                Ok(ev) => ev,
+                Err(_) => break, // tx dropped → queue drained → exit
+            };
+            // re-run the full pipeline (L1 in µs, then L2/L3) on the escalated event
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pipeline.evaluate(&ev)))
+            {
+                Ok(d) => handle(&ev, &d, &enforcer, &blocked),
+                Err(_) => eprintln!("a3s-sentry: a judge panicked on an escalated event — skipped"),
+            }
+        }));
+    }
+
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let (mut total, mut blocked) = (0u64, 0u64);
+    let mut total = 0u64;
 
     // Bounded line reader: observer events are small, so cap each read — a pathological unbounded
     // line can't amplify memory (an oversize line fragments into capped chunks that fail to parse).
@@ -99,58 +127,77 @@ fn main() -> anyhow::Result<()> {
             continue;
         };
         total += 1;
-        // Contain a panic in any judge to a single skipped event — a malformed/hostile event must
-        // not take down the security daemon (which would then fail-open for everything after).
-        let decision =
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pipeline.evaluate(&ev)))
-            {
-                Ok(d) => d,
-                Err(_) => {
-                    eprintln!("a3s-sentry: a judge panicked on an event — skipped");
-                    continue;
-                }
-            };
-
-        // Enforce blocks; allow/escalate-resolved-to-allow just flow on.
-        let mut enforced: Option<String> = None;
-        if decision.verdict == Verdict::Block {
-            blocked += 1;
-            if let Some(action) = &decision.action {
-                match enforcer.apply(action) {
-                    Ok(Some(path)) => enforced = Some(path.display().to_string()),
-                    Ok(None) => {}
-                    Err(e) => eprintln!("a3s-sentry: enforce write failed: {e}"),
-                }
+        // L1 inline — fast, can't head-of-line-block the stream; panic-contained per event.
+        let d1 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pipeline.classify_l1(&ev)
+        })) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("a3s-sentry: L1 panicked on an event — skipped");
+                continue;
             }
+        };
+        if d1.verdict == Verdict::Escalate {
+            // hand the slow L2/L3 work to a worker; on a full queue, degrade gracefully (fail mode)
+            if let Err(e) = tx.try_send(ev) {
+                let (mpsc::TrySendError::Full(ev) | mpsc::TrySendError::Disconnected(ev)) = e;
+                degraded.fetch_add(1, Ordering::Relaxed);
+                let d = pipeline.resolve_overload(d1);
+                handle(&ev, &d, &enforcer, &blocked);
+            }
+        } else {
+            handle(&ev, &d1, &enforcer, &blocked);
         }
 
-        // Audit anything noteworthy: blocks, anything a deeper tier touched, and flagged-but-allowed
-        // events (an escalation that resolved to allow keeps its severity). Plain benign L1 allows
-        // (Info, decided by Rules) are counted, not printed, to keep the stream signal-dense.
-        if decision.verdict != Verdict::Allow
-            || decision.severity > Severity::Info
-            || decision.tier != Tier::Rules
-        {
-            let rec = Audit {
-                agent: ev.identity.agent.clone(),
-                event: ev.event.name(),
-                subject: truncate(&ev.event.subject(), 300),
-                decision: &decision,
-                enforced,
-            };
-            if let Ok(json) = serde_json::to_string(&rec) {
-                let _ = writeln!(out, "{json}");
-                let _ = out.flush();
-            }
-        }
-
-        if total % 10_000 == 0 {
-            eprintln!("a3s-sentry: {total} events, {blocked} blocked");
+        if total.is_multiple_of(10_000) {
+            eprintln!(
+                "a3s-sentry: {total} events, {} blocked, {} overload-degraded",
+                blocked.load(Ordering::Relaxed),
+                degraded.load(Ordering::Relaxed)
+            );
         }
     }
 
-    eprintln!("a3s-sentry: stopped — {total} events, {blocked} blocked");
+    drop(tx); // close the channel → workers finish the queue and exit
+    for w in workers {
+        let _ = w.join();
+    }
+    eprintln!(
+        "a3s-sentry: stopped — {total} events, {} blocked, {} overload-degraded",
+        blocked.load(Ordering::Relaxed),
+        degraded.load(Ordering::Relaxed)
+    );
     Ok(())
+}
+
+/// Apply a decision: enforce a block via the shared enforcer and audit anything noteworthy. Shared
+/// by the ingest thread (L1 allow/block) and the workers (L2/L3 results), so it locks the enforcer.
+fn handle(ev: &ObservedEvent, d: &Decision, enforcer: &Mutex<Enforcer>, blocked: &AtomicU64) {
+    let mut enforced: Option<String> = None;
+    if d.verdict == Verdict::Block {
+        blocked.fetch_add(1, Ordering::Relaxed);
+        if let Some(action) = &d.action {
+            match enforcer.lock().unwrap().apply(action) {
+                Ok(Some(path)) => enforced = Some(path.display().to_string()),
+                Ok(None) => {}
+                Err(e) => eprintln!("a3s-sentry: enforce write failed: {e}"),
+            }
+        }
+    }
+    // Blocks, anything a deeper tier touched, and flagged-but-allowed escalations are audited; plain
+    // benign L1 allows (Info, decided by Rules) are counted, not printed, to keep the stream dense.
+    if d.verdict != Verdict::Allow || d.severity > Severity::Info || d.tier != Tier::Rules {
+        let rec = Audit {
+            agent: ev.identity.agent.clone(),
+            event: ev.event.name(),
+            subject: truncate(&ev.event.subject(), 300),
+            decision: d,
+            enforced,
+        };
+        if let Ok(json) = serde_json::to_string(&rec) {
+            println!("{json}");
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -178,6 +225,8 @@ struct Config {
     speculate_above: Option<Severity>,
     llm_timeout_s: u64,
     agent_timeout_s: u64,
+    workers: usize,
+    queue_cap: usize,
     dry_run: bool,
 }
 
@@ -205,6 +254,15 @@ impl Config {
             agent_timeout_s: env("A3S_SENTRY_AGENT_TIMEOUT")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(120),
+            // worker pool for the slow L2/L3 tiers so they never head-of-line-block the L1 stream
+            workers: env("A3S_SENTRY_WORKERS")
+                .and_then(|v| v.parse().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(4),
+            queue_cap: env("A3S_SENTRY_QUEUE")
+                .and_then(|v| v.parse().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(256),
             dry_run: env("A3S_SENTRY_DRY_RUN").is_some(),
         }
     }
@@ -284,6 +342,8 @@ Env config:
   A3S_SENTRY_SPECULATE=<sev>      run L2+L3 in PARALLEL when L1 escalates at >= <sev> (default: high)
   A3S_SENTRY_LLM_TIMEOUT=<secs>   L2 request timeout (default 30; reasoning models take ~15-30s)
   A3S_SENTRY_AGENT_TIMEOUT=<secs> L3 investigation timeout (default 120)
+  A3S_SENTRY_WORKERS=<n>          L2/L3 worker threads off the ingest thread (default 4)
+  A3S_SENTRY_QUEUE=<n>            escalation queue depth (default 256; full → graceful fail-mode)
   A3S_SENTRY_DRY_RUN=1            judge + audit, but never write a deny-file
 
 The policy file is hot-reloaded: rewrite it from any program (or your config system) and the rules

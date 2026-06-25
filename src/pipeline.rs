@@ -82,6 +82,20 @@ impl Pipeline {
         }
     }
 
+    /// Run only L1 — the cheap, always-on tier. A daemon can call this inline on its ingest thread
+    /// and dispatch only the `Escalate` results to a worker pool, so a slow L2/L3 never head-of-line
+    /// blocks the event stream. The worker then calls [`evaluate`](Pipeline::evaluate) (L1 re-runs in
+    /// µs, then L2/L3) on the escalated event.
+    pub fn classify_l1(&self, ev: &ObservedEvent) -> Decision {
+        self.l1.judge(ev)
+    }
+
+    /// Resolve an L1 escalation immediately per the fail mode (for when the worker queue is full —
+    /// graceful degradation: the event gets the fail-open/closed verdict instead of deep analysis).
+    pub fn resolve_overload(&self, d1: Decision) -> Decision {
+        self.resolve_unescalated(d1)
+    }
+
     fn should_speculate(&self, d1: &Decision) -> bool {
         self.speculate_above.is_some_and(|t| d1.severity >= t)
     }

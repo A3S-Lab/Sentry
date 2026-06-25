@@ -158,6 +158,7 @@ SSH client… key material can be transmitted outbound after being loaded into m
 | `A3S_SENTRY_SPECULATE` | run L2+L3 **in parallel** when L1 escalates at ≥ this severity (e.g. `high`) |
 | `A3S_SENTRY_LLM_TIMEOUT` | L2 request timeout in seconds (default **30**; reasoning models take ~15–30s) |
 | `A3S_SENTRY_AGENT_TIMEOUT` | L3 investigation timeout in seconds (default 120) |
+| `A3S_SENTRY_WORKERS` / `_QUEUE` | L2/L3 worker threads (default 4) + escalation queue depth (default 256) |
 | `A3S_SENTRY_DRY_RUN` | judge + audit, never write a deny-file |
 
 ## Honest boundaries
@@ -183,8 +184,9 @@ SSH client… key material can be transmitted outbound after being loaded into m
   as the deterministic floor no prompt can talk its way past.
 - **L1 I/O content needs observer's opt-in SSL capture** (`A3S_OBSERVER_SSL=1`, OpenSSL only).
   Without it sentry still sees exec / egress / file / SecurityAction, just not prompt/response text.
-- **L3 runs synchronously** per event; a slow L3 stalls the stream (observer then *drops* events — it
-  won't wedge). Reached rarely, but at extreme event rates run L1/L2 only or dispatch L3 out of band.
+- **L2/L3 run in a worker pool** off the ingest thread, so a slow tier never head-of-line-blocks the
+  L1 stream (validated: ~1.15M ev/s with a 0.5s L2 in the mix). Under an escalation flood the bounded
+  queue degrades gracefully to the fail-mode (audited; counted as `overload-degraded`).
 
 ## Build & test
 
@@ -200,9 +202,10 @@ Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those
 - **Integration** (`tests/integration.rs`) — the real binary end to end: block → deny-file, dry-run,
   fail-open/closed, malformed-input, live hot-reload, `--version`, and the **L2 round-trip** against a
   mock OpenAI endpoint (CI-reproducible).
-- **Soak** (`scripts/soak.sh`) — sustained mixed load + a policy rewrite under load, with RSS /
-  throughput / leak checks. Last run: **10M+ events at ~350k–850k ev/s, RSS flat, 0 panics**, deny-file
-  bounded by dedup.
+- **Soak** (`scripts/soak.sh` + `scripts/soak-l2.sh`) — sustained mixed load + policy-rewrite-under-load
+  (10M+ events, RSS flat, 0 panics, dedup-bounded); and a **worker-pool soak** proving a slow L2 never
+  head-of-line-blocks the L1 stream (**~1.15M ev/s on Linux with a 0.5s L2**, RSS flat 6.5 MB, graceful
+  overload degradation).
 - **Real LLM + agent** — L2 validated against a live `glm5.1-w4a8`: blocks a credential read,
   *allows* a placeholder secret in a README (false-positive reduction). The real model (~16s — a
   reasoning model) exposed that the old hardcoded 10s timeout would fail **open** on real threats;

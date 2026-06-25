@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.3] — worker pool: no more L2/L3 head-of-line blocking
+
+### Changed
+- **L2/L3 now run in a bounded worker pool** off the ingest thread. L1 runs inline (µs) on every
+  event; only escalations dispatch to the workers, so a slow L2/L3 occupies a worker — not the event
+  stream. Under an escalation flood the queue degrades gracefully to the fail-mode (audited as
+  `overload-degraded`) instead of blocking ingest. `A3S_SENTRY_WORKERS` (default 4) +
+  `A3S_SENTRY_QUEUE` (default 256). New `Pipeline::classify_l1` / `resolve_overload`.
+- Validated on Linux (`scripts/soak-l2.sh`): **~1.15M events/s with a 0.5s L2 in the mix** (vs the old
+  synchronous design's ~8 ev/s ceiling), RSS flat at 6.5 MB, 0 panics, graceful overload degradation.
+
 ## [0.3.2] — measured accuracy + eval-driven rule fixes
 
 ### Added

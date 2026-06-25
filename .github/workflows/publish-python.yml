@@ -1,0 +1,33 @@
+name: publish-python
+
+# Publish the Python SDK to PyPI on a `python-vX.Y.Z` tag (independent of the daemon's `v*` tags).
+# Requires a `PYPI_API_TOKEN` repository secret.
+on:
+  push:
+    tags: ["python-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: test
+        run: python -m unittest discover -s tests -t . # integration tests auto-skip (no binary)
+      - name: build
+        run: |
+          pip install --upgrade build twine
+          python -m build
+      - name: publish
+        run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}

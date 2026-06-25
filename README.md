@@ -38,6 +38,18 @@ Observer provides the **signal** (`ToolExec`, `SslContent`, `SecurityAction`, `E
 hot-reload). Sentry decides. It never enforces anything itself — keeping it a pure policy brain and
 the kernel the single enforcement point.
 
+## Install
+
+A `vX.Y.Z` tag runs [`release.yml`](.github/workflows/release.yml), which publishes:
+
+- **Container** — `ghcr.io/a3s-lab/sentry:<version>` (L1 + L2 out of the box; for L3 layer Node +
+  `@a3s-lab/code` into a derived image). `docker run --rm -i ghcr.io/a3s-lab/sentry:latest < events.ndjson`
+- **Static binary** — `a3s-sentry-x86_64-linux`, attached to the GitHub Release.
+- **From source** — `cargo build --release` → `target/release/sentry`.
+
+Operating it in production? See the [**operator runbook**](docs/RUNBOOK.md) (rollout, fail mode,
+alarms, tuning).
+
 ## Quickstart
 
 ```bash

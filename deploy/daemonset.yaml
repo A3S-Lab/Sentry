@@ -34,6 +34,10 @@ spec:
       containers:
         # observe + judge: collector | sentry in one container (needs both binaries in the image)
         - name: observe-judge
+          # Needs both binaries to pipe collector → sentry in one container. Build by layering the
+          # published a3s-sentry onto observer's image:
+          #   FROM ghcr.io/a3s-lab/observer:latest
+          #   COPY --from=ghcr.io/a3s-lab/sentry:latest /usr/local/bin/a3s-sentry /usr/local/bin/
           image: ghcr.io/a3s-lab/observer-sentry:latest
           securityContext: { privileged: true } # eBPF (CAP_BPF/CAP_PERFMON) + SSL uprobe
           command: ["/bin/sh", "-c"]

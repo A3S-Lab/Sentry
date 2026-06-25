@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.1] — release pipeline, container image, operator runbook
+
+GA items (ii)/(iii)/(iv) — make sentry installable, deployable, and operable. No crate code change;
+infrastructure + docs. Tag `v0.5.1` to cut the first published artifacts.
+
+### Added
+- **Release pipeline** (`.github/workflows/release.yml`) — on a `vX.Y.Z` tag: builds a static
+  `x86_64-unknown-linux-musl` binary (attached to the GitHub Release) and builds + pushes a container
+  image to `ghcr.io/a3s-lab/sentry`.
+- **Container image** (`Dockerfile`) — slim, non-root (L1+L2 out of the box; L3 needs Node +
+  `@a3s-lab/code` layered into a derived image). The reference DaemonSet's combined `observer-sentry`
+  image is now documented as observer's image with this binary layered on.
+- **Operator runbook** ([`docs/RUNBOOK.md`](docs/RUNBOOK.md)) — rollout (dry-run → enforce), fail-open
+  vs fail-closed, the two alarm metrics (`overload_degraded` / `enforce_failed`), tuning under load,
+  deny-file lifecycle, LLM/L3 outage behavior, and a quick-triage table.
+
 ## [0.5.0] — self-observability (metrics + health)
 
 GA item (i): a *fail-open* security control has to be alertable — otherwise a silent enforcement

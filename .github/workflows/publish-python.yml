@@ -51,8 +51,8 @@ jobs:
             echo "PYPI_API_TOKEN not set — skipping PyPI; wheels still ship to the GitHub Release."
           fi
       - name: GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Python SDK $GITHUB_REF_NAME" --generate-notes \
-            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          name: Python SDK ${{ github.ref_name }}
+          generate_release_notes: true

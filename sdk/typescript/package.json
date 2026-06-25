@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/A3S-Lab/Sentry"
+    "url": "git+https://github.com/A3S-Lab/Sentry.git"
   },
   "main": "index.js",
   "types": "index.d.ts",

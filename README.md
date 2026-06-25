@@ -133,6 +133,8 @@ the cost of always running L3 for them (the speculation trade).
 | `A3S_SENTRY_EGRESS_DENY` / `_FILE_DENY` / `_EXEC_DENY` | observer deny-files to append blocks to |
 | `A3S_SENTRY_FAIL_CLOSED` | unresolved escalations **block** (default: fail-open / allow) |
 | `A3S_SENTRY_SPECULATE` | run L2+L3 **in parallel** when L1 escalates at ≥ this severity (e.g. `high`) |
+| `A3S_SENTRY_LLM_TIMEOUT` | L2 request timeout in seconds (default **30**; reasoning models take ~15–30s) |
+| `A3S_SENTRY_AGENT_TIMEOUT` | L3 investigation timeout in seconds (default 120) |
 | `A3S_SENTRY_DRY_RUN` | judge + audit, never write a deny-file |
 
 ## Honest boundaries
@@ -173,10 +175,15 @@ Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those
 
 - **Unit** (34) — rules + escalation + enforce + parsing + the speculative/hot-reload logic.
 - **Integration** (`tests/integration.rs`) — the real binary end to end: block → deny-file, dry-run,
-  fail-open/closed, malformed-input, live hot-reload, `--version`.
+  fail-open/closed, malformed-input, live hot-reload, `--version`, and the **L2 round-trip** against a
+  mock OpenAI endpoint (CI-reproducible).
 - **Soak** (`scripts/soak.sh`) — sustained mixed load + a policy rewrite under load, with RSS /
   throughput / leak checks. Last run: **10M+ events at ~350k–850k ev/s, RSS flat, 0 panics**, deny-file
   bounded by dedup.
+- **Real LLM** — L2 validated against a live `glm5.1-w4a8`: blocks a credential read (`critical`),
+  *allows* a placeholder secret in a README (false-positive reduction). The real model (~16s — a
+  reasoning model) exposed that the old hardcoded 10s timeout would fail **open** on real threats;
+  the timeout is now 30s by default and tunable (`A3S_SENTRY_LLM_TIMEOUT`).
 
 ## Layout
 

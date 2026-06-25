@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.2] — real-LLM validation + L2 timeout fix
+
+### Fixed
+- **L2 timeout was too short for reasoning models.** Tested against a live `glm5.1-w4a8`, a real
+  classification takes ~16s; the hardcoded 10s timeout would expire → escalate → fail-open →
+  **allow the threat** even though the model judged it correctly. The timeout is now configurable
+  (`A3S_SENTRY_LLM_TIMEOUT`, default **30s**; `A3S_SENTRY_AGENT_TIMEOUT` for L3, default 120s). This
+  bug was invisible to mock tests (which respond instantly) — only a real LLM surfaced it.
+
+### Added
+- L2 round-trip integration test against a mock OpenAI endpoint (CI-reproducible, no real model).
+- Validated end to end against the live GLM: a credential read → `block` (critical) → enforced; a
+  placeholder secret in a README → `allow` ("not an actual secret") — L2 correctly reduces L1's
+  false positives.
+
 ## [0.2.1] — hardening + full test pyramid
 
 ### Added

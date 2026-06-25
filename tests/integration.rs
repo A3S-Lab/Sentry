@@ -163,3 +163,41 @@ fn hot_reload_applies_new_policy_live() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn l2_llm_round_trip_via_mock_endpoint() {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    // a minimal OpenAI-compatible endpoint that returns a block verdict — exercises the full L2 wire
+    // path (request build → POST → response parse → escalate→L2→block→enforce) without a real model.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0u8; 16384];
+            let _ = sock.read(&mut buf); // drain the request (we don't need to parse it)
+            let body = "{\"choices\":[{\"message\":{\"content\":\"{\\\"verdict\\\":\\\"block\\\",\\\"severity\\\":\\\"high\\\",\\\"reason\\\":\\\"mock says block\\\"}\"}}]}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        }
+    });
+
+    let url = format!("http://127.0.0.1:{port}/v1");
+    let (stdout, _) = run(&[("A3S_SENTRY_LLM_URL", &url)], CREDS);
+    server.join().ok();
+
+    assert!(
+        stdout.contains("\"tier\":\"Llm\""),
+        "L2 should be the deciding tier: {stdout}"
+    );
+    assert!(stdout.contains("\"verdict\":\"block\""));
+    assert!(
+        stdout.contains("mock says block"),
+        "should carry the model's reason: {stdout}"
+    );
+}

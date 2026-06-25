@@ -176,6 +176,8 @@ struct Config {
     exec_deny: Option<PathBuf>,
     fail_closed: bool,
     speculate_above: Option<Severity>,
+    llm_timeout_s: u64,
+    agent_timeout_s: u64,
     dry_run: bool,
 }
 
@@ -195,6 +197,14 @@ impl Config {
             fail_closed: env("A3S_SENTRY_FAIL_CLOSED").is_some(),
             // Presence enables speculation; the value sets the severity threshold (default High).
             speculate_above: env("A3S_SENTRY_SPECULATE").map(|v| parse_sev(&v)),
+            // Reasoning LLMs are slow (a real GLM-5 classification measured ~16s) — default 30s, not
+            // the old 10s, and make it tunable per model.
+            llm_timeout_s: env("A3S_SENTRY_LLM_TIMEOUT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            agent_timeout_s: env("A3S_SENTRY_AGENT_TIMEOUT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
             dry_run: env("A3S_SENTRY_DRY_RUN").is_some(),
         }
     }
@@ -208,14 +218,14 @@ impl Config {
                 url,
                 &self.llm_model,
                 self.llm_key.clone(),
-                Duration::from_secs(10),
+                Duration::from_secs(self.llm_timeout_s),
             )));
         }
         if let Some(bin) = &self.agent_bin {
             p = p.with_l3(Arc::new(AgentJudge::new(
                 bin.clone(),
                 self.skills_dir.clone(),
-                Duration::from_secs(120),
+                Duration::from_secs(self.agent_timeout_s),
                 self.fail_closed,
             )));
         }
@@ -272,6 +282,8 @@ Env config:
   A3S_SENTRY_EXEC_DENY=<file>     observer exec deny-file
   A3S_SENTRY_FAIL_CLOSED=1        unresolved escalations BLOCK (default: fail-open / allow)
   A3S_SENTRY_SPECULATE=<sev>      run L2+L3 in PARALLEL when L1 escalates at >= <sev> (default: high)
+  A3S_SENTRY_LLM_TIMEOUT=<secs>   L2 request timeout (default 30; reasoning models take ~15-30s)
+  A3S_SENTRY_AGENT_TIMEOUT=<secs> L3 investigation timeout (default 120)
   A3S_SENTRY_DRY_RUN=1            judge + audit, but never write a deny-file
 
 The policy file is hot-reloaded: rewrite it from any program (or your config system) and the rules

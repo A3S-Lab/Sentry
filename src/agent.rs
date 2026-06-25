@@ -98,35 +98,65 @@ impl AgentJudge {
 
     fn investigate(&self, ev: &ObservedEvent) -> anyhow::Result<AgentVerdict> {
         let prompt = Self::build_prompt(ev);
-        let mut child = Command::new(&self.bin)
-            .args(self.args(&prompt))
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(self.args(&prompt))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        // Own process group, so on timeout we SIGKILL the WHOLE tree. The agent bin (e.g. a Node
+        // a3s-code) spawns helpers that a bare child.kill() would orphan — and an orphan holding the
+        // inherited stdout pipe keeps the reader thread blocked forever (one leaked thread + FD per
+        // timeout, a slow-burn exhaustion of the terminal security tier).
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("spawning `{}`: {e}", self.bin))?;
 
         // Drain stdout on a thread so a deep run can't deadlock on a full pipe; the channel recv
-        // doubles as our timeout (the reader returns when the child closes stdout = exits).
-        let mut stdout = child.stdout.take().expect("piped");
+        // doubles as our timeout (the reader returns when stdout closes = the child exits). Bound the
+        // read so a runaway/compromised agent can't OOM us — a verdict JSON is tiny; 1 MiB is generous.
+        let stdout = child.stdout.take().expect("piped");
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let mut s = String::new();
-            let _ = stdout.read_to_string(&mut s);
+            let _ = stdout.take(MAX_AGENT_OUT).read_to_string(&mut s);
             let _ = tx.send(s);
         });
 
-        match rx.recv_timeout(self.timeout) {
+        let result = match rx.recv_timeout(self.timeout) {
             Ok(out) => {
-                let _ = child.wait();
                 parse_verdict(&out).ok_or_else(|| anyhow::anyhow!("no verdict in agent output"))
             }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait(); // reap: kill() only signals; wait() removes the zombie
-                anyhow::bail!("L3 timed out after {:?}", self.timeout)
-            }
-        }
+            Err(_) => Err(anyhow::anyhow!("L3 timed out after {:?}", self.timeout)),
+        };
+        // Always tear down the whole group: on timeout this closes every inherited pipe write end so
+        // the reader thread sees EOF (no leak) and aborts the work; on success it reaps any lingering
+        // grandchild so the wait() below can't block past the deadline. wait() then reaps the child.
+        kill_group(&mut child);
+        let _ = child.wait();
+        result
+    }
+}
+
+/// Output bound for the L3 agent's stdout — symmetric with the daemon's 256 KiB stdin cap.
+const MAX_AGENT_OUT: u64 = 1024 * 1024;
+
+/// SIGKILL the child's whole process group (negative pid) so no descendant survives holding the
+/// stdout pipe; direct kill on non-unix. Best-effort — a stale/empty group is a harmless ESRCH.
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    // SAFETY: kill(2) with a negative pid signals the process group. The pid is still valid (we have
+    // not waited yet); SIGKILL to an already-dead group just returns ESRCH, which we ignore.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
     }
 }
 

@@ -215,10 +215,11 @@ cargo build --release
 
 Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those live in a3s-observer.
 
-- **Unit** (34) — rules + escalation + enforce + parsing + the speculative/hot-reload logic.
-- **Integration** (`tests/integration.rs`) — the real binary end to end: block → deny-file, dry-run,
-  fail-open/closed, malformed-input, live hot-reload, `--version`, and the **L2 round-trip** against a
-  mock OpenAI endpoint (CI-reproducible).
+- **Unit** (39) — rules + escalation + enforce + parsing + the speculative/hot-reload/cap logic.
+- **Integration** (`tests/integration.rs`, 11) — the real binary end to end: block → deny-file,
+  dry-run, fail-open/closed, malformed-input, live hot-reload, `--version`, the **L2 round-trip**
+  against a mock OpenAI endpoint, the **L3 agent** path (mock agent → block → deny-file), and
+  **overload degradation** (slow L3 + queue=1 → graceful degrade, clean exit). All CI-reproducible.
 - **Soak** (`scripts/soak.sh` + `scripts/soak-l2.sh`) — sustained mixed load + policy-rewrite-under-load
   (10M+ events, RSS flat, 0 panics, dedup-bounded); and a **worker-pool soak** proving a slow L2 never
   head-of-line-blocks the L1 stream (**~1.15M ev/s on Linux with a 0.5s L2**, RSS flat 6.5 MB, graceful

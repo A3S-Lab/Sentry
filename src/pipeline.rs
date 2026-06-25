@@ -13,8 +13,15 @@
 
 use crate::event::ObservedEvent;
 use crate::verdict::{Decision, Severity, Tier, Verdict};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
+
+/// Hard cap on concurrent *speculative* L3 investigations. The non-speculative path is already
+/// bounded by the worker pool; speculation detaches L3 on a fast L2 `Block`, so without a cap a
+/// high-risk flood could fan out unbounded agent subprocesses. Above the cap, evaluate falls back to
+/// sequential (which joins L3) — still full analysis, just not parallel.
+const DEFAULT_L3_SPEC_CAP: u64 = 8;
 
 /// One tier. Cheap tiers (`L1`) run on every event; expensive ones (`L2`/`L3`) only on escalations.
 /// `Send + Sync` so a tier can run on a worker thread (speculative parallelism).
@@ -31,6 +38,10 @@ pub struct Pipeline {
     l3: Option<Arc<dyn Judge>>,
     fail_closed: bool,
     speculate_above: Option<Severity>,
+    /// Live count of speculative L3 threads (incl. ones detached after an L2 short-circuit), so we
+    /// can stop speculating once `l3_spec_cap` are already in flight.
+    l3_inflight: Arc<AtomicU64>,
+    l3_spec_cap: u64,
 }
 
 impl Pipeline {
@@ -41,7 +52,15 @@ impl Pipeline {
             l3: None,
             fail_closed: false,
             speculate_above: None,
+            l3_inflight: Arc::new(AtomicU64::new(0)),
+            l3_spec_cap: DEFAULT_L3_SPEC_CAP,
         }
+    }
+
+    /// Cap on concurrent speculative L3 investigations (default 8). Set to 0 to disable speculation.
+    pub fn l3_spec_cap(mut self, cap: u64) -> Self {
+        self.l3_spec_cap = cap;
+        self
     }
 
     pub fn with_l2(mut self, l2: Arc<dyn Judge>) -> Self {
@@ -98,6 +117,7 @@ impl Pipeline {
 
     fn should_speculate(&self, d1: &Decision) -> bool {
         self.speculate_above.is_some_and(|t| d1.severity >= t)
+            && self.l3_inflight.load(Ordering::Relaxed) < self.l3_spec_cap
     }
 
     /// High-risk: start L3 (slow) alongside L2 (fast). A fast L2 `Block` short-circuits for response
@@ -111,10 +131,18 @@ impl Pipeline {
     ) -> Decision {
         let l3c = Arc::clone(l3);
         let evc = ev.clone();
-        let handle = thread::spawn(move || l3c.judge(&evc));
+        // Count this L3 as in-flight until its thread finishes — even if we short-circuit below and
+        // detach it — so `should_speculate` stops spawning once `l3_spec_cap` are concurrently live.
+        self.l3_inflight.fetch_add(1, Ordering::Relaxed);
+        let inflight = Arc::clone(&self.l3_inflight);
+        let handle = thread::spawn(move || {
+            let d = l3c.judge(&evc);
+            inflight.fetch_sub(1, Ordering::Relaxed);
+            d
+        });
         let d2 = l2.judge(ev);
         if d2.verdict == Verdict::Block {
-            return d2;
+            return d2; // L3 detached but still counted in-flight → caps further speculation
         }
         match handle.join() {
             Ok(d3) if d3.verdict != Verdict::Escalate => d3,
@@ -255,6 +283,24 @@ mod tests {
         .with_l2(Arc::new(Fixed(Tier::Llm, Verdict::Allow)))
         .with_l3(Arc::new(Fixed(Tier::Agent, Verdict::Block)))
         .speculate_above(Some(Severity::High));
+        let d = p.evaluate(&ev());
+        assert_eq!(d.verdict, Verdict::Allow);
+        assert_eq!(d.tier, Tier::Llm);
+    }
+
+    #[test]
+    fn spec_cap_zero_disables_speculation_falls_back_to_sequential() {
+        // cap=0 → even a HIGH-risk escalate won't speculate; it runs sequential, so L2's allow ends
+        // it and the L3 that would block is never consulted. This bounds the detached-L3 fan-out.
+        let p = Pipeline::new(Arc::new(FixedSev(
+            Tier::Rules,
+            Verdict::Escalate,
+            Severity::High,
+        )))
+        .with_l2(Arc::new(Fixed(Tier::Llm, Verdict::Allow)))
+        .with_l3(Arc::new(Fixed(Tier::Agent, Verdict::Block)))
+        .speculate_above(Some(Severity::High))
+        .l3_spec_cap(0);
         let d = p.evaluate(&ev());
         assert_eq!(d.verdict, Verdict::Allow);
         assert_eq!(d.tier, Tier::Llm);

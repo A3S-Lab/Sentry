@@ -120,6 +120,90 @@ fn skips_malformed_input_without_crashing() {
     );
 }
 
+/// Write an executable mock script (to stand in for A3S_SENTRY_AGENT_BIN). Unix only.
+#[cfg(unix)]
+fn write_exec(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// L3 path end to end: CREDS escalates at L1; with no L2 it goes straight to the L3 agent (a mock
+/// here), whose `block` is enforced to the file deny-list. (The L3 tier had no integration coverage.)
+#[cfg(unix)]
+#[test]
+fn l3_agent_block_is_enforced() {
+    let dir = tmp("l3");
+    let bin = write_exec(
+        &dir,
+        "mock-agent.sh",
+        "#!/bin/sh\necho '{\"verdict\":\"block\",\"severity\":\"high\",\"reason\":\"mock L3 investigated\"}'\n",
+    );
+    let deny = dir.join("file-deny.txt");
+    let (stdout, _) = run(
+        &[
+            ("A3S_SENTRY_AGENT_BIN", bin.to_str().unwrap()),
+            ("A3S_SENTRY_FILE_DENY", deny.to_str().unwrap()),
+        ],
+        CREDS,
+    );
+    assert!(
+        stdout.contains("\"tier\":\"Agent\""),
+        "L3 should decide: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"verdict\":\"block\""),
+        "L3 should block: {stdout}"
+    );
+    assert!(
+        stdout.contains("mock L3 investigated"),
+        "carries the L3 reason: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&deny).unwrap().trim(),
+        "/home/a/.aws/credentials",
+        "block enforced to the file deny-list"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Overload path: a slow L3 + a 1-deep queue + 1 worker means a burst of escalations can't all be
+/// serviced, so the surplus degrades gracefully (counted, not lost) and the daemon still exits clean.
+#[cfg(unix)]
+#[test]
+fn overload_degrades_under_slow_l3_and_tiny_queue() {
+    let dir = tmp("overload");
+    let bin = write_exec(
+        &dir,
+        "slow-agent.sh",
+        "#!/bin/sh\nsleep 0.3\necho '{\"verdict\":\"allow\",\"severity\":\"low\",\"reason\":\"slow\"}'\n",
+    );
+    let input = CREDS.repeat(10); // 10 escalations vs 1 worker + 1 queue slot → most must degrade
+    let (_, stderr) = run(
+        &[
+            ("A3S_SENTRY_AGENT_BIN", bin.to_str().unwrap()),
+            ("A3S_SENTRY_WORKERS", "1"),
+            ("A3S_SENTRY_QUEUE", "1"),
+        ],
+        &input,
+    );
+    // final stderr stats line: "... stopped — N events, B blocked, D overload-degraded"
+    let degraded: u64 = stderr
+        .lines()
+        .find(|l| l.contains("stopped"))
+        .and_then(|l| l.rsplit_once(", ").map(|(_, t)| t.to_string()))
+        .and_then(|t| t.split_whitespace().next().map(str::to_string))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        degraded >= 1,
+        "a slow L3 + queue=1 + workers=1 + 10 escalations should degrade some: {stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn version_flag_prints_version() {
     let out = Command::new(BIN).arg("--version").output().unwrap();

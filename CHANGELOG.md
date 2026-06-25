@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.4.2] — L3 subprocess lifecycle hardening
+
+An adversarial security review of the post-v0.1.0 code — the worker pool, the overload fail-mode, and
+the L3 agent subprocess — surfaced 5 real issues (and correctly rejected 11), all clustered in the L3
+subprocess lifecycle. The worker pool and the overload/fail-mode paths were found sound.
+
+### Fixed
+- **L3 stdout read is now bounded** (`agent.rs`). `read_to_string` on the agent's stdout had no cap —
+  a runaway or compromised agent binary could OOM the daemon. Now `.take(1 MiB)` (a verdict JSON is
+  tiny), symmetric with the daemon's 256 KiB stdin cap.
+- **Timeout now SIGKILLs the agent's whole process group, not just the direct child** (`agent.rs`).
+  The agent bin (a Node a3s-code) spawns helpers; a bare `child.kill()` orphaned them, and an orphan
+  holding the inherited stdout pipe kept the reader thread blocked forever — leaking a thread + FD per
+  timeout. The child now runs in its own process group (`process_group(0)`) and cleanup kills the group
+  (`-pid`), so every pipe end closes and the reader exits. (Adds a unix-only `libc` dependency.)
+- **The success path no longer blocks on `wait()` past the deadline** (`agent.rs`). Cleanup now always
+  group-kills then waits, so an agent that closes stdout but lingers can't pin a worker indefinitely.
+- **Speculative L3 fan-out is capped** (`pipeline.rs`). On a fast L2 `Block` the speculative L3 thread
+  was detached and ran to its timeout; under opt-in speculation a high-risk flood could accumulate
+  unbounded agent subprocesses. A live-count cap (`l3_spec_cap`, default 8) stops speculating once that
+  many L3 are in flight — above it, evaluation falls back to sequential (still full analysis).
+
+### Tested
+- New integration coverage for the two previously-untested paths: **L3 end to end** (mock agent →
+  escalate → block → deny-file) and the **overload-degrade** path (slow L3 + queue=1 → graceful
+  degradation + clean exit), plus a unit test that the speculation cap forces the sequential fallback.
+  39 unit + 11 integration, all green; fmt + clippy `-D warnings` clean.
+
 ## [0.4.1] — durability fix + an honest durability claim
 
 Found by an adversarial verification pass over the v0.4.0 GA claims (the kind of overstatement that

@@ -1,6 +1,6 @@
 [package]
 name = "a3s-sentry"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 license = "MIT"
 description = "Tiered (L1 rules / L2 LLM / L3 agent) runtime security control for AI agents, built on a3s-observer."
@@ -13,6 +13,10 @@ regex = "1"
 ureq = { version = "2", features = ["json"] }
 hcl-rs = "0.18"
 anyhow = "1"
+
+# Unix-only: SIGKILL the L3 agent's whole process group on timeout (no std API for killpg).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [[bin]]
 name = "sentry"

@@ -79,11 +79,13 @@ enforcing. Set your images, the agent cgroup path, RBAC, and the LLM secret for 
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) gates fmt + clippy + the full test suite on
 every push.
 
-**Shutdown is durable by design** — each decision is line-flushed to stdout and each deny is
-`append`-written + closed per target, so an abrupt `SIGTERM`/`SIGKILL` loses no committed audit or
-deny line. On normal pod termination the upstream closes the pipe → stdin EOF → sentry drains the
-in-flight worker queue and prints final stats before exiting. (No signal-handling dependency: only
-in-flight escalations — whose agent is terminating in the same pod — are dropped.)
+**Shutdown is durable by design** — the daemon has no buffered sink: each deny is `append`-written +
+closed per target (the durable enforcement record — **page-cache durable, not `fsync`'d**, since the
+deny-files are ephemeral node-local scratch the guards re-read and re-observation regenerates) and
+each decision is line-flushed to stdout (best-effort audit). An abrupt `SIGTERM`/`SIGKILL` loses only
+the in-flight event(s) being judged, never an already-written deny. On normal pod termination the
+upstream closes the pipe → stdin EOF → sentry drains the in-flight worker queue and prints final stats
+before exiting. (No signal-handling dependency.)
 
 ## L1 — the rule engine
 

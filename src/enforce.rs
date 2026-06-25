@@ -68,7 +68,7 @@ impl Enforcer {
             self.seen.clear();
         }
         let key = format!("{}\0{}", kind_tag(action), target);
-        if !self.seen.insert(key) {
+        if self.seen.contains(&key) {
             return Ok(None);
         }
         let Some(path) = sink else { return Ok(None) };
@@ -77,6 +77,9 @@ impl Enforcer {
         }
         let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
         writeln!(f, "{target}")?;
+        // Mark seen only AFTER a successful write: a write that errored (disk full, EIO) must be
+        // retried on the next occurrence, not silently deduped away — a dropped block can't be permanent.
+        self.seen.insert(key);
         Ok(Some(path))
     }
 }
@@ -138,6 +141,20 @@ mod tests {
         let body = std::fs::read_to_string(&egress).unwrap();
         assert_eq!(body, "1.2.3.4\n5.6.7.8\n");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failed_write_is_retried_not_deduped() {
+        // sink in a nonexistent dir → open() errors. A failed write must NOT mark the target seen,
+        // or a transient disk error would permanently drop a block.
+        let bad = std::path::PathBuf::from("/nonexistent-sentry-dir-xyz/egress-deny.txt");
+        let mut e = Enforcer::new(Some(bad), None, None, false);
+        let a = EnforceAction::DenyEgress("9.9.9.9".into());
+        assert!(e.apply(&a).is_err(), "write to a bad path errors");
+        assert!(
+            e.apply(&a).is_err(),
+            "and is retried (not silently deduped to Ok(None))"
+        );
     }
 
     #[test]

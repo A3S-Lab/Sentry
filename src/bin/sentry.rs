@@ -177,7 +177,13 @@ fn handle(ev: &ObservedEvent, d: &Decision, enforcer: &Mutex<Enforcer>, blocked:
     if d.verdict == Verdict::Block {
         blocked.fetch_add(1, Ordering::Relaxed);
         if let Some(action) = &d.action {
-            match enforcer.lock().unwrap().apply(action) {
+            // Recover a poisoned lock instead of unwrap-panicking: if one apply ever panicked while
+            // holding the lock, a security control must keep enforcing for every other worker, not wedge.
+            match enforcer
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .apply(action)
+            {
                 Ok(Some(path)) => enforced = Some(path.display().to_string()),
                 Ok(None) => {}
                 Err(e) => eprintln!("a3s-sentry: enforce write failed: {e}"),

@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.1] — durability fix + an honest durability claim
+
+Found by an adversarial verification pass over the v0.4.0 GA claims (the kind of overstatement that
+only survives until someone tries to refute it).
+
+### Fixed
+- **A failed deny-write was deduped away permanently.** `Enforcer::apply` marked a target *seen*
+  **before** writing it, so if the write errored (disk full, EIO) the block was never retried on the
+  next occurrence — a dropped enforcement made permanent. It now records *seen* only **after** a
+  successful write (test: `failed_write_is_retried_not_deduped`).
+- **A poisoned enforcer lock no longer wedges the worker pool.** `handle()` recovers the lock
+  (`into_inner`) instead of `unwrap`-panicking, so a panic inside one `apply` can't take down every
+  other worker's enforcement.
+
+### Docs
+- Corrected the v0.4.0 "durable shutdown" wording, which overstated the guarantee. Precise statement:
+  the deny-file is the durable enforcement record (`append` + close per target — **page-cache
+  durable, not `fsync`'d**, by design, since the deny-files are ephemeral node-local scratch the
+  guards re-read and re-observation regenerates); the stdout audit line is best-effort observability.
+  An abrupt termination loses only the in-flight event(s) being judged, never an already-written deny;
+  a signal in the narrow window between the deny write and its audit line can drop that one audit line
+  while the deny still enforces.
+
 ## [0.4.0] — production-readiness: CI + deploy + verified-durable shutdown
 
 Closes the last of the four GA gaps (#1 chain/EPERM, #2 accuracy, #3 worker-pool, #4 ops).
@@ -14,8 +37,9 @@ Closes the last of the four GA gaps (#1 chain/EPERM, #2 accuracy, #3 worker-pool
 ### Verified (not changed)
 - **Graceful shutdown was already durable** — a review of the premise ("SIGTERM loses the final
   flush") found it false: every decision is line-flushed (`println!` → `LineWriter`) and every deny is
-  `append`-written + closed per target, so an abrupt `SIGTERM`/`SIGKILL` loses no committed audit or
-  deny line. Normal pod termination closes the upstream pipe → stdin EOF → the worker queue drains and
+  `append`-written + closed per target, so an abrupt `SIGTERM`/`SIGKILL` loses no already-written deny
+  line (only the in-flight event being judged). Normal pod termination closes the upstream pipe →
+  stdin EOF → the worker queue drains and
   final stats print before exit. No `signal-hook`/signal dependency added — it would only buy a
   cosmetic summary line, and in-flight escalations belong to an agent terminating in the same pod.
 

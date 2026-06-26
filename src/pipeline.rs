@@ -11,7 +11,7 @@
 //! so ready sooner — is authoritative. High-risk events thus get the deep look without paying the
 //! serial L2+L3 latency.
 
-use crate::event::ObservedEvent;
+use crate::event::{Event, ObservedEvent};
 use crate::verdict::{Decision, Severity, Tier, Verdict};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -36,6 +36,9 @@ pub struct Pipeline {
     l1: Arc<dyn Judge>,
     l2: Option<Arc<dyn Judge>>,
     l3: Option<Arc<dyn Judge>>,
+    /// The SAE mechanistic-interpretability tier — judges model-output `LlmActivations` events from
+    /// a3s-power's in-enclave feature emission (a separate domain from the observer-event rule chain).
+    sae: Option<Arc<dyn Judge>>,
     fail_closed: bool,
     speculate_above: Option<Severity>,
     /// Live count of speculative L3 threads (incl. ones detached after an L2 short-circuit), so we
@@ -50,6 +53,7 @@ impl Pipeline {
             l1,
             l2: None,
             l3: None,
+            sae: None,
             fail_closed: false,
             speculate_above: None,
             l3_inflight: Arc::new(AtomicU64::new(0)),
@@ -73,6 +77,13 @@ impl Pipeline {
         self
     }
 
+    /// The SAE mechanistic-interpretability tier. Model-output `LlmActivations` events route here
+    /// instead of the L1 rule chain; an SAE escalation can still defer to the deep L3 agent.
+    pub fn with_sae(mut self, sae: Arc<dyn Judge>) -> Self {
+        self.sae = Some(sae);
+        self
+    }
+
     /// Treat an unresolved escalation (no deeper tier available) as `Block` instead of `Allow`.
     pub fn fail_closed(mut self, yes: bool) -> Self {
         self.fail_closed = yes;
@@ -86,8 +97,26 @@ impl Pipeline {
         self
     }
 
+    /// Route a model-output `LlmActivations` event to the SAE tier (with L3-on-escalate). Returns
+    /// `None` for non-activation events, or when no SAE tier is configured (they take the rule chain).
+    fn judge_model_output(&self, ev: &ObservedEvent) -> Option<Decision> {
+        if !matches!(ev.event, Event::LlmActivations { .. }) {
+            return None;
+        }
+        let sae = self.sae.as_ref()?;
+        let d = sae.judge(ev);
+        Some(match (d.verdict, &self.l3) {
+            (Verdict::Escalate, Some(l3)) => l3.judge(ev),
+            (Verdict::Escalate, None) => self.resolve_unescalated(d),
+            _ => d,
+        })
+    }
+
     /// Run the event through the tiers and return the deciding [`Decision`].
     pub fn evaluate(&self, ev: &ObservedEvent) -> Decision {
+        if let Some(d) = self.judge_model_output(ev) {
+            return d;
+        }
         let d1 = self.l1.judge(ev);
         if d1.verdict != Verdict::Escalate {
             return d1;
@@ -106,6 +135,12 @@ impl Pipeline {
     /// blocks the event stream. The worker then calls [`evaluate`](Pipeline::evaluate) (L1 re-runs in
     /// µs, then L2/L3) on the escalated event.
     pub fn classify_l1(&self, ev: &ObservedEvent) -> Decision {
+        // Model-output activations are judged by the SAE tier, not the rule engine.
+        if let Some(sae) = &self.sae {
+            if matches!(ev.event, Event::LlmActivations { .. }) {
+                return sae.judge(ev);
+            }
+        }
         self.l1.judge(ev)
     }
 
@@ -235,6 +270,34 @@ mod tests {
     fn l1_block_is_final_no_l2_call() {
         let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Block)));
         assert_eq!(p.evaluate(&ev()).verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn model_activations_route_to_sae_tier() {
+        use crate::event::{Event, Identity};
+        let act = ObservedEvent {
+            identity: Identity::default(),
+            provider: None,
+            event: Event::LlmActivations {
+                pid: 1,
+                layer: 18,
+                features: vec![],
+            },
+            raw: String::new(),
+        };
+        // Activations are judged by the SAE tier, not the rule chain.
+        let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Allow)))
+            .with_sae(Arc::new(Fixed(Tier::Sae, Verdict::Block)));
+        let d = p.evaluate(&act);
+        assert_eq!(d.verdict, Verdict::Block);
+        assert_eq!(d.tier, Tier::Sae);
+        // A non-activation event still takes the L1 rule chain.
+        assert_eq!(p.evaluate(&ev()).verdict, Verdict::Allow);
+        // An SAE escalation defers to the deep L3 agent when present.
+        let p2 = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Allow)))
+            .with_sae(Arc::new(Fixed(Tier::Sae, Verdict::Escalate)))
+            .with_l3(Arc::new(Fixed(Tier::Agent, Verdict::Block)));
+        assert_eq!(p2.evaluate(&act).tier, Tier::Agent);
     }
 
     #[test]

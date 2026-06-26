@@ -10,6 +10,7 @@
 //!
 //! llm   { url = "http://llm:18051/v1" model = "glm" key = "..." timeout_s = 30 }   # L2 (optional)
 //! agent { bin = "a3s-code" skills = "./skills" timeout_s = 120 }                    # L3 (optional)
+//! sae   { dict = "features.json" escalate_at = 0.3 block_at = 0.6 }                 # mech-interp (optional)
 //! deny  { egress = "egress.txt" file = "file.txt" exec = "exec.txt" }               # sinks (optional)
 //!
 //! rules = [
@@ -21,6 +22,7 @@
 use crate::enforce::Enforcer;
 use crate::pipeline::{Judge, Pipeline};
 use crate::rules::{default_rules, LiveRules, RuleEngine, RuleSpec};
+use crate::sae::SaeJudge;
 use crate::verdict::Severity;
 use crate::{AgentJudge, LlmJudge};
 use serde::Deserialize;
@@ -41,6 +43,9 @@ pub struct SdkConfig {
     pub llm: Option<LlmCfg>,
     /// L3 — a deep a3s-code agent investigation. Omit if you don't run L3.
     pub agent: Option<AgentCfg>,
+    /// SAE mechanistic-interpretability tier — judges model-output `LlmActivations` events (from
+    /// a3s-power's in-enclave tap) against a labeled feature dictionary. Omit if you don't run it.
+    pub sae: Option<SaeCfg>,
     /// Deny-file sinks the kernel guards read. Omit to judge without enforcing.
     pub deny: Option<DenyCfg>,
     /// L1 site rules, evaluated before the built-in defaults (first match wins).
@@ -61,6 +66,16 @@ pub struct AgentCfg {
     pub bin: String,
     pub skills: Option<String>,
     pub timeout_s: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaeCfg {
+    /// Path to the labeled feature dictionary JSON: `{ "8801": {concept, category, weight, severity?}, ... }`.
+    pub dict: String,
+    /// harmful ≥ this → escalate (default 0.30).
+    pub escalate_at: Option<f32>,
+    /// harmful ≥ this → block (default 0.60).
+    pub block_at: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -110,6 +125,13 @@ impl SdkConfig {
                 self.fail_closed,
             )));
         }
+        if let Some(s) = self.sae {
+            let mut judge = SaeJudge::from_path(Path::new(&s.dict))?;
+            if let (Some(e), Some(b)) = (s.escalate_at, s.block_at) {
+                judge = judge.thresholds(e, b);
+            }
+            pipeline = pipeline.with_sae(Arc::new(judge));
+        }
 
         let deny = self.deny.unwrap_or_default();
         let enforcer = Enforcer::new(
@@ -130,5 +152,40 @@ fn parse_severity(s: &str) -> Severity {
         "medium" => Severity::Medium,
         "critical" => Severity::Critical,
         _ => Severity::High,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::verdict::{Tier, Verdict};
+
+    #[test]
+    fn sae_block_wires_the_tier_and_judges_activations() {
+        // A labeled feature dictionary on disk.
+        let dir = std::env::temp_dir();
+        let dict_path = dir.join("sentry_sae_cfg_test_dict.json");
+        std::fs::write(
+            &dict_path,
+            r#"{"8801":{"concept":"exploit-code-synthesis","category":"cyber_offense","weight":0.9,"severity":"high"}}"#,
+        )
+        .unwrap();
+
+        let acl = format!(
+            "fail_closed = false\nsae {{ dict = \"{}\" }}\n",
+            dict_path.display()
+        );
+        let (pipeline, _enforcer) = SdkConfig::from_acl(&acl).unwrap().build().unwrap();
+
+        // A model-output activations line with the harmful feature firing → blocked + explained.
+        let line = r#"{"identity":{"agent":"deep-finance"},"event":{"LlmActivations":{"pid":1,"layer":18,"features":[[8801,0.95]]}}}"#;
+        let ev = crate::event::ObservedEvent::parse(line).expect("parses");
+        let d = pipeline.evaluate(&ev);
+        assert_eq!(d.verdict, Verdict::Block);
+        assert_eq!(d.tier, Tier::Sae);
+        let ex = d.explain.expect("explainability present");
+        assert_eq!(ex.drivers[0].concept, "exploit-code-synthesis");
+
+        let _ = std::fs::remove_file(&dict_path);
     }
 }

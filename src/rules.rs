@@ -96,6 +96,7 @@ impl RuleEngine {
                     severity: r.spec.severity,
                     reason: format!("{}: {}", r.spec.name, r.spec.reason),
                     action,
+                    explain: None,
                 };
             }
         }

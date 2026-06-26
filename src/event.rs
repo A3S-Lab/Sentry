@@ -91,6 +91,17 @@ pub enum Event {
         #[serde(default)]
         write: bool,
     },
+    /// Sparse SAE feature activations from a3s-power's in-enclave interpretability tap — the model's
+    /// residual stream at one layer, encoded by a Sparse Autoencoder. Only `(feature_id, activation)`
+    /// pairs leave the TEE (never the prompt/completion plaintext), so the SAE tier scores the model's
+    /// internal concepts confidentially.
+    LlmActivations {
+        pid: u32,
+        #[serde(default)]
+        layer: u32,
+        #[serde(default)]
+        features: Vec<(u32, f32)>,
+    },
 }
 
 impl Event {
@@ -103,6 +114,7 @@ impl Event {
             Event::Egress { .. } => "Egress",
             Event::Dns { .. } => "Dns",
             Event::FileAccess { .. } => "FileAccess",
+            Event::LlmActivations { .. } => "LlmActivations",
         }
     }
 
@@ -115,6 +127,11 @@ impl Event {
             Event::Egress { peer, port, .. } => format!("{peer}:{port}"),
             Event::Dns { query, .. } => query.clone(),
             Event::FileAccess { path, .. } => path.clone(),
+            Event::LlmActivations {
+                features, layer, ..
+            } => {
+                format!("{} sae features @L{layer}", features.len())
+            }
         }
     }
 
@@ -125,7 +142,8 @@ impl Event {
             | Event::SecurityAction { pid, .. }
             | Event::Egress { pid, .. }
             | Event::Dns { pid, .. }
-            | Event::FileAccess { pid, .. } => Some(*pid),
+            | Event::FileAccess { pid, .. }
+            | Event::LlmActivations { pid, .. } => Some(*pid),
         }
     }
 

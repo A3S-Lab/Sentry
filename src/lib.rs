@@ -25,6 +25,7 @@ pub mod llm;
 pub mod metrics;
 pub mod pipeline;
 pub mod rules;
+pub mod sae;
 pub mod sdk;
 pub mod verdict;
 
@@ -36,5 +37,6 @@ pub use llm::LlmJudge;
 pub use metrics::Metrics;
 pub use pipeline::{Judge, Pipeline};
 pub use rules::{default_rules, LiveRules, RuleEngine, RuleSpec};
+pub use sae::{FeatureDict, FeatureLabel, SaeJudge};
 pub use sdk::Sentry;
-pub use verdict::{Decision, EnforceAction, Severity, Tier, Verdict};
+pub use verdict::{Decision, Driver, EnforceAction, SaeScore, Severity, Tier, Verdict};

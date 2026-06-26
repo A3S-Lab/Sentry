@@ -18,6 +18,7 @@ use crate::pipeline::Judge;
 use crate::verdict::{Decision, Driver, SaeScore, Severity, Tier, Verdict};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 /// One SAE feature's safety meaning — turns an anonymous feature id into a named, weighted concept.
 /// Produced offline by probing the SAE on a labeled safety set + causal validation (ablate the
@@ -69,6 +70,13 @@ impl SaeJudge {
             .filter_map(|(k, v)| k.parse::<u32>().ok().map(|id| (id, v)))
             .collect();
         Ok(Self::new(dict))
+    }
+
+    /// Load the labeled feature dictionary from a JSON file on disk.
+    pub fn from_path(path: &Path) -> anyhow::Result<Self> {
+        let json = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("reading SAE feature dict {}: {e}", path.display()))?;
+        Self::from_json(&json)
     }
 
     pub fn thresholds(mut self, escalate_at: f32, block_at: f32) -> Self {

@@ -20,10 +20,15 @@ The three tiers trade cost for depth, so expensive judgment runs only on what ch
 | **L1** | deterministic regex rule engine (ACL-configurable) | µs | every event |
 | **L2** | a fast LLM classifier (OpenAI-compatible endpoint) | ~100s ms | events L1 escalates |
 | **L3** | a deep [a3s-code](https://github.com/AI45Lab/Code) agent with security skills | seconds–minutes | events L2 escalates |
+| **SAE** | a Sparse Autoencoder over the model's residual stream, tapped in-TEE by [a3s-power](https://github.com/A3S-Lab/Power) | ~ms | model-output `LlmActivations` events |
 
 L1 catches the unambiguous cases outright and flags the rest; L2 gives a fast second opinion; L3
 actually investigates — reading the event in context, considering the attack chain — for the
 genuinely hard cases. Each tier is a `Judge`, so the set is swappable and unit-tested.
+
+A fourth, parallel tier — **SAE** — judges a different signal entirely: the model's *own output*,
+by its internal features rather than its (obfuscable) text. See
+[SAE — mechanistic interpretability](#sae--mechanistic-interpretability-of-model-output).
 
 ## How it fits a3s-observer
 
@@ -205,6 +210,37 @@ high-risk events. It uses `A3S_SENTRY_L3_*` (falling back to `A3S_SENTRY_LLM_*`)
 stronger/different model than L2 — or run without L2 at all. Validated against a live a3s-code + GLM:
 an SSH-private-key read → `block` with the agent reasoning *"a generic Python interpreter, not a known
 SSH client… key material can be transmitted outbound after being loaded into memory."*
+
+## SAE — mechanistic interpretability of model output
+
+The L1–L3 tiers judge what the agent *did* (observer's syscall / network events). The **SAE tier**
+judges what the model *said* — its output — and does it **white-box**: instead of reading the
+completion text (which an attacker can base64/cipher-obfuscate), it reads the model's own
+**residual-stream features**.
+
+[a3s-power](https://github.com/A3S-Lab/Power) serves the model inside a TEE, taps the residual stream
+at one layer, encodes it with a Sparse Autoencoder, and emits **only** the sparse `(feature_id,
+activation)` pairs as an `LlmActivations` event — the prompt/completion plaintext never leaves the
+enclave. Sentry's `SaeJudge` scores those features against a labeled feature dictionary:
+
+- **white-box** — judges the model's *internal concepts*, so an obfuscated harmful output still lights
+  its concept feature;
+- **confidential** — sees only feature ids / activations, never the text (the model runs in the TEE);
+- **explainable** — the score is *linear in named features*, decomposed into ranked drivers
+  (`exploit-code-synthesis (#8801) → 0.82`), not a second black box.
+
+```hcl
+sae { dict = "features.json"  escalate_at = 0.3  block_at = 0.6 }   # mech-interp tier (optional)
+```
+
+The feature dictionary (`feature_id → {concept, category, weight, severity}`) is an offline artifact:
+train or adopt an SAE for the served model, probe + label its safety-relevant features, and
+causal-validate each label (ablate the feature, confirm the score moves). Model-output events route to
+this tier (not the rule chain); an SAE escalation can still defer to the deep L3 agent. The `Decision`
+carries the explainability in `explain` (`SaeScore`: per-category scores + ranked drivers) for the
+dashboard. Output text has no kernel deny target, so an SAE block rides the enclosing
+`ToolExec`/`Egress` action event. a3s-power's side of the chain is planned in
+[its `docs/sae-interpretability-plan.md`](https://github.com/A3S-Lab/Power/blob/main/docs/sae-interpretability-plan.md).
 
 ## Config (env)
 

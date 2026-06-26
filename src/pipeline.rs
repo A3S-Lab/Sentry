@@ -186,6 +186,7 @@ impl Pipeline {
             } else {
                 None
             },
+            explain: None,
         }
     }
 }
@@ -221,6 +222,7 @@ mod tests {
                 severity: self.2,
                 reason: "x".into(),
                 action: None,
+                explain: None,
             }
         }
     }

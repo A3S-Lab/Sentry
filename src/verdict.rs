@@ -38,6 +38,10 @@ pub enum Tier {
     Llm,
     /// L3 — deep a3s-code agent investigation.
     Agent,
+    /// Mechanistic interpretability — a Sparse Autoencoder over the model's residual stream, tapped
+    /// in-enclave by a3s-power. Judges the model's *internal concepts* from feature activations
+    /// (never the plaintext), so the score is white-box and confidential.
+    Sae,
 }
 
 /// A concrete block to push down to a3s-observer's deny-files. The target string is an IP/host
@@ -47,6 +51,32 @@ pub enum EnforceAction {
     DenyEgress(String),
     DenyFile(String),
     DenyExec(String),
+}
+
+/// One named contributor to an [`SaeScore`] — the explainability spine the dashboard renders. Each
+/// driver is traceable (`source`) to a rule, a probe direction, or an SAE feature, with the
+/// activation that fired and its weighted contribution to the harmful score.
+#[derive(Debug, Clone, Serialize)]
+pub struct Driver {
+    pub concept: String,
+    pub category: String,
+    /// `"sae_feature:#8801"` | `"probe:cyber_offense"` | `"rule:CWE-94"`.
+    pub source: String,
+    pub activation: f32,
+    pub contribution: f32,
+}
+
+/// The explainable safety score for one model output — the "why" behind a mechanistic [`Decision`].
+/// The score is *linear in interpretable features*, so it's auditable rather than a second black box.
+#[derive(Debug, Clone, Serialize)]
+pub struct SaeScore {
+    /// 0..1 — the worst category (a single severe category must not be diluted by benign ones).
+    pub harmful: f32,
+    pub safety: f32,
+    pub per_category: std::collections::BTreeMap<String, f32>,
+    pub drivers: Vec<Driver>,
+    /// `"activation"` (white-box SAE/probe) | `"text"` (black-box judge fallback).
+    pub channel: &'static str,
 }
 
 /// A tier's conclusion about one event.
@@ -60,6 +90,9 @@ pub struct Decision {
     /// target (an egress IP, a file path, an exec binary).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<EnforceAction>,
+    /// The mechanistic explainability sidecar — present when an SAE/probe tier scored a model output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<SaeScore>,
 }
 
 impl Decision {
@@ -70,6 +103,7 @@ impl Decision {
             severity: Severity::Info,
             reason: reason.into(),
             action: None,
+            explain: None,
         }
     }
 
@@ -80,6 +114,7 @@ impl Decision {
             severity,
             reason: reason.into(),
             action: None,
+            explain: None,
         }
     }
 
@@ -90,11 +125,18 @@ impl Decision {
             severity,
             reason: reason.into(),
             action: None,
+            explain: None,
         }
     }
 
     pub fn with_action(mut self, action: Option<EnforceAction>) -> Self {
         self.action = action;
+        self
+    }
+
+    /// Attach the mechanistic explainability sidecar (SAE/probe drivers + per-category scores).
+    pub fn with_explain(mut self, explain: SaeScore) -> Self {
+        self.explain = Some(explain);
         self
     }
 }

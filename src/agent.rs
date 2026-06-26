@@ -197,6 +197,7 @@ impl Judge for AgentJudge {
                     } else {
                         None
                     },
+                    explain: None,
                 }
             }
         }

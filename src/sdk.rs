@@ -7,6 +7,7 @@
 use crate::config::SdkConfig;
 use crate::enforce::Enforcer;
 use crate::event::ObservedEvent;
+use crate::inline::{self, Direction, InlineDecision};
 use crate::pipeline::Pipeline;
 use crate::verdict::{Decision, Verdict};
 use std::path::Path;
@@ -50,6 +51,14 @@ impl Sentry {
     /// Judge a parsed event.
     pub fn evaluate_event(&self, ev: &ObservedEvent) -> Decision {
         self.pipeline.evaluate(ev)
+    }
+
+    /// Inline gate for an in-flight LLM/MCP body: run the same tiered judges over the decoded wire
+    /// `content` and return the [`InlineDecision`] (block/allow + secret/PII spans to redact). This is
+    /// the pre-execution path a3s-gateway's wire proxy calls; the reactive [`evaluate`](Sentry::evaluate)
+    /// path stays for observer's NDJSON stream. See [`crate::inline`].
+    pub fn inspect_wire(&self, content: &str, dir: Direction) -> InlineDecision {
+        inline::inspect(&self.pipeline, content, dir)
     }
 
     /// Judge one observer event (an NDJSON line / object). `None` if it isn't a parseable event.

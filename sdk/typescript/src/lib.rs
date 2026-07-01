@@ -4,7 +4,10 @@
 //! judges an observer event in-process and returns a typed `Decision`. No daemon, no subprocess
 //! (beyond what L3 itself spawns) — the same model as @a3s-lab/code.
 
-use a3s_sentry::{EnforceAction as CoreAction, Sentry as CoreSentry, Severity, Tier, Verdict};
+use a3s_sentry::{
+    EnforceAction as CoreAction, RiskType as CoreRiskType, Sentry as CoreSentry, Severity, Tier,
+    Verdict,
+};
 use napi_derive::napi;
 
 #[napi(object)]
@@ -13,6 +16,16 @@ pub struct EnforceAction {
     pub kind: String,
     /// The IP/host, path, or binary the kernel guard will deny.
     pub target: String,
+}
+
+#[napi(object)]
+pub struct RiskDescriptor {
+    /// Stable taxonomy code, e.g. `systemic_risk` or `command_danger`.
+    pub category: String,
+    /// Human-readable label for operators.
+    pub name: String,
+    /// `system` | `communication` | `atomic`.
+    pub risk_type: String,
 }
 
 #[napi(object)]
@@ -25,6 +38,7 @@ pub struct Decision {
     pub severity: String,
     pub reason: String,
     pub action: Option<EnforceAction>,
+    pub risk: Option<RiskDescriptor>,
 }
 
 #[napi(object)]
@@ -79,6 +93,7 @@ fn to_decision(d: a3s_sentry::Decision) -> Decision {
         Tier::Rules => "Rules",
         Tier::Llm => "Llm",
         Tier::Agent => "Agent",
+        Tier::Sae => "Sae",
     };
     let severity = match d.severity {
         Severity::Info => "info",
@@ -102,6 +117,16 @@ fn to_decision(d: a3s_sentry::Decision) -> Decision {
                 kind: kind.to_string(),
                 target,
             }
+        }),
+        risk: d.risk.map(|r| RiskDescriptor {
+            category: r.category,
+            name: r.name,
+            risk_type: match r.risk_type {
+                CoreRiskType::System => "system",
+                CoreRiskType::Communication => "communication",
+                CoreRiskType::Atomic => "atomic",
+            }
+            .to_string(),
         }),
     }
 }

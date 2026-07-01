@@ -109,6 +109,7 @@ impl Judge for LlmJudge {
             // Defer rather than guess: a flaky endpoint must not become a silent allow.
             Err(e) => {
                 Decision::escalate(Tier::Llm, Severity::Medium, format!("L2 unavailable: {e}"))
+                    .with_inferred_risk(ev.event.name())
             }
         }
     }
@@ -132,10 +133,12 @@ impl LlmVerdict {
         let severity = parse_severity(&self.severity);
         let reason = format!("L2: {}", self.reason);
         if self.verdict.eq_ignore_ascii_case("block") {
-            Decision::block(Tier::Llm, severity, reason).with_action(ev.event.natural_deny())
+            Decision::block(Tier::Llm, severity, reason)
+                .with_action(ev.event.natural_deny())
+                .with_inferred_risk(ev.event.name())
         } else if self.verdict.eq_ignore_ascii_case("escalate") {
             // L2 is unsure → hand off to the L3 deep investigator (or fail-mode if no L3).
-            Decision::escalate(Tier::Llm, severity, reason)
+            Decision::escalate(Tier::Llm, severity, reason).with_inferred_risk(ev.event.name())
         } else {
             Decision::allow(Tier::Llm, reason)
         }

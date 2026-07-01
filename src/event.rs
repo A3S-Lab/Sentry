@@ -218,6 +218,12 @@ mod tests {
     }
 
     #[test]
+    fn collector_heartbeat_is_control_plane_not_judged() {
+        let line = r#"{"identity":{},"provider":null,"event":{"CollectorHeartbeat":{"collector_id":"node-a","version":"0.11.0","mode":"observe","attached_probes":18,"enabled_features":["exec"],"interval_secs":60,"exec":1,"exit":0,"egress":0,"dns":0,"file":0,"llm":0,"ssl":0,"sec":0,"dropped":0,"output_dropped":0}}}"#;
+        assert!(ObservedEvent::parse(line).is_none());
+    }
+
+    #[test]
     fn rejects_non_json_and_blank() {
         assert!(ObservedEvent::parse("").is_none());
         assert!(ObservedEvent::parse("  INFO some log line").is_none());

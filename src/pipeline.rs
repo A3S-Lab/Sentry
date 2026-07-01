@@ -221,6 +221,7 @@ impl Pipeline {
             } else {
                 None
             },
+            risk: d.risk,
             explain: None,
         }
     }
@@ -257,6 +258,7 @@ mod tests {
                 severity: self.2,
                 reason: "x".into(),
                 action: None,
+                risk: None,
                 explain: None,
             }
         }

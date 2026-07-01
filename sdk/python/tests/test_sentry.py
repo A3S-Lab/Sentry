@@ -48,6 +48,9 @@ class TestSentry(unittest.TestCase):
         self.assertIsNotNone(d.action)
         self.assertEqual(d.action.kind, "DenyEgress")
         self.assertEqual(d.action.target, "169.254.169.254")
+        self.assertIsNotNone(d.risk)
+        self.assertEqual(d.risk.category, "systemic_risk")
+        self.assertEqual(d.risk.risk_type, "system")
 
     def test_sdk_authored_rule_fires_at_rules_tier(self):
         d = self.sentry.evaluate(dns(1, "high.test"))
@@ -202,6 +205,7 @@ class TestSentry(unittest.TestCase):
         text = repr(d)
         self.assertIn("Decision(", text)
         self.assertIn("action=None", text)
+        self.assertIn("risk=None", text)
 
     def test_enforce_action_repr_directly(self):
         d = self.sentry.evaluate(egress(1, "169.254.169.254", 80))

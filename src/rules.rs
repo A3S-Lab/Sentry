@@ -96,6 +96,12 @@ impl RuleEngine {
                     severity: r.spec.severity,
                     reason: format!("{}: {}", r.spec.name, r.spec.reason),
                     action,
+                    risk: (r.spec.verdict != Verdict::Allow).then(|| {
+                        crate::verdict::RiskDescriptor::infer(
+                            kind,
+                            &format!("{}: {}", r.spec.name, r.spec.reason),
+                        )
+                    }),
                     explain: None,
                 };
             }
@@ -414,12 +420,16 @@ mod tests {
             r#"{"event":{"Egress":{"pid":1,"peer":"169.254.169.254","port":80}}}"#,
         ));
         assert_eq!(d.verdict, Verdict::Block);
+        let risk = d.risk.expect("metadata block carries risk taxonomy");
+        assert_eq!(risk.category, "systemic_risk");
+        assert_eq!(risk.risk_type, crate::verdict::RiskType::System);
     }
 
     #[test]
     fn escalates_possible_secret_not_block() {
         let d = engine().evaluate(&ev(r#"{"event":{"SslContent":{"pid":1,"is_read":false,"content":"export API_KEY=sk-abcdef0123456789"}}}"#));
         assert_eq!(d.verdict, Verdict::Escalate);
+        assert_eq!(d.risk.unwrap().category, "secret_exfil");
     }
 
     #[test]

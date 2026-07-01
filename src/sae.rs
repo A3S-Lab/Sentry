@@ -187,6 +187,13 @@ impl Judge for SaeJudge {
             severity,
             reason,
             action: None,
+            risk: (verdict != Verdict::Allow).then(|| {
+                crate::verdict::RiskDescriptor::new(
+                    "model_output_risk",
+                    "Risky model-output concepts",
+                    crate::verdict::RiskType::Communication,
+                )
+            }),
             explain: Some(score),
         }
     }

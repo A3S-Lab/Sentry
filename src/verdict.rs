@@ -44,6 +44,109 @@ pub enum Tier {
     Sae,
 }
 
+/// Broad grouping for operational dashboards and incident routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RiskType {
+    /// System / infrastructure blast radius: metadata SSRF, privilege escalation, injection.
+    System,
+    /// Cross-boundary communication: secrets leaving, prompt injection, callbacks.
+    Communication,
+    /// One agent action: dangerous command, local credential access, other single-agent risk.
+    Atomic,
+}
+
+/// Stable taxonomy attached to a non-allow decision. This belongs in sentry because it is part of
+/// the policy brain's semantics; downstream platforms should not reverse-engineer it from prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiskDescriptor {
+    pub category: String,
+    pub name: String,
+    pub risk_type: RiskType,
+}
+
+impl RiskDescriptor {
+    pub fn new(category: &str, name: &str, risk_type: RiskType) -> Self {
+        Self {
+            category: category.into(),
+            name: name.into(),
+            risk_type,
+        }
+    }
+
+    /// Infer a stable risk taxonomy from the deciding rule/tier reason and event kind. This keeps
+    /// custom L1 rules and L2/L3 outputs useful even when they don't explicitly name a category.
+    pub fn infer(event_kind: &str, reason: &str) -> Self {
+        let r = reason.to_lowercase();
+        if (r.contains("metadata") || r.contains("ssrf"))
+            && (event_kind == "Egress" || event_kind == "Dns")
+        {
+            return Self::new("systemic_risk", "Cloud metadata SSRF", RiskType::System);
+        }
+        if r.contains("privilege")
+            || r.contains("ptrace")
+            || r.contains("process injection")
+            || r.contains("listening port")
+            || r.contains("backdoor")
+        {
+            return Self::new(
+                "privilege_escalation",
+                "Privilege escalation / process injection",
+                RiskType::System,
+            );
+        }
+        if r.contains("secret in outbound")
+            || r.contains("secret exfil")
+            || r.contains("private key")
+        {
+            return Self::new(
+                "secret_exfil",
+                "Secret exfiltration",
+                RiskType::Communication,
+            );
+        }
+        if r.contains("prompt injection") || r.contains("jailbreak") {
+            return Self::new(
+                "prompt_injection",
+                "Prompt injection / jailbreak",
+                RiskType::Communication,
+            );
+        }
+        if r.contains("exfil")
+            || r.contains("callback")
+            || r.contains("oob")
+            || r.contains("dnslog")
+        {
+            return Self::new(
+                "communication_risk",
+                "Suspicious external communication",
+                RiskType::Communication,
+            );
+        }
+        if r.contains("credential") || r.contains("sensitive file") || event_kind == "FileAccess" {
+            return Self::new(
+                "data_leak",
+                "Credential or sensitive file access",
+                RiskType::Atomic,
+            );
+        }
+        if r.contains("piped")
+            || r.contains("reverse-shell")
+            || r.contains("destructive")
+            || r.contains("disk")
+            || r.contains("rce")
+            || event_kind == "ToolExec"
+        {
+            return Self::new(
+                "command_danger",
+                "Dangerous command execution",
+                RiskType::Atomic,
+            );
+        }
+        Self::new("other", "Other risk", RiskType::Atomic)
+    }
+}
+
 /// A concrete block to push down to a3s-observer's deny-files. The target string is an IP/host
 /// (egress), or a path (file / exec binary) — matching what the observer guards read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -90,6 +193,9 @@ pub struct Decision {
     /// target (an egress IP, a file path, an exec binary).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<EnforceAction>,
+    /// Stable risk taxonomy for non-allow decisions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<RiskDescriptor>,
     /// The mechanistic explainability sidecar — present when an SAE/probe tier scored a model output.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explain: Option<SaeScore>,
@@ -103,6 +209,7 @@ impl Decision {
             severity: Severity::Info,
             reason: reason.into(),
             action: None,
+            risk: None,
             explain: None,
         }
     }
@@ -114,6 +221,7 @@ impl Decision {
             severity,
             reason: reason.into(),
             action: None,
+            risk: None,
             explain: None,
         }
     }
@@ -125,12 +233,23 @@ impl Decision {
             severity,
             reason: reason.into(),
             action: None,
+            risk: None,
             explain: None,
         }
     }
 
     pub fn with_action(mut self, action: Option<EnforceAction>) -> Self {
         self.action = action;
+        self
+    }
+
+    pub fn with_risk(mut self, risk: RiskDescriptor) -> Self {
+        self.risk = Some(risk);
+        self
+    }
+
+    pub fn with_inferred_risk(mut self, event_kind: &str) -> Self {
+        self.risk = Some(RiskDescriptor::infer(event_kind, &self.reason));
         self
     }
 

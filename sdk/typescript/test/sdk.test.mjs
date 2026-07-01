@@ -30,6 +30,8 @@ test("create + built-in cloud-metadata SSRF blocks (DenyEgress)", () => {
   const d = s.evaluate(egress(1, "169.254.169.254", 80));
   assert.equal(d.verdict, "block");
   assert.deepEqual(d.action, { kind: "DenyEgress", target: "169.254.169.254" });
+  assert.equal(d.risk.category, "systemic_risk");
+  assert.equal(d.risk.riskType ?? d.risk.risk_type, "system");
 });
 
 test("SDK-authored ACL rule fires at tier=Rules", () => {

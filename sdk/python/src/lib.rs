@@ -11,7 +11,7 @@
 //! assert d.verdict == "block"
 //! ```
 
-use ::a3s_sentry::verdict::{Decision as CoreDecision, EnforceAction as CoreAction, Severity, Tier, Verdict};
+use ::a3s_sentry::verdict::{Decision as CoreDecision, EnforceAction as CoreAction, RiskType as CoreRiskType, Severity, Tier, Verdict};
 use ::a3s_sentry::Sentry as CoreSentry;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -47,6 +47,26 @@ impl From<&CoreAction> for EnforceAction {
     }
 }
 
+/// Stable risk taxonomy attached to a decision, e.g. category=`systemic_risk`,
+/// risk_type=`system`.
+#[pyclass(get_all)]
+#[derive(Clone)]
+struct RiskDescriptor {
+    category: String,
+    name: String,
+    risk_type: String,
+}
+
+#[pymethods]
+impl RiskDescriptor {
+    fn __repr__(&self) -> String {
+        format!(
+            "RiskDescriptor(category={:?}, name={:?}, risk_type={:?})",
+            self.category, self.name, self.risk_type
+        )
+    }
+}
+
 /// One tier's conclusion about an event. `verdict` is `"allow"`/`"block"`/`"escalate"`, `tier` is
 /// `"Rules"`/`"Llm"`/`"Agent"`, `severity` is `"info"`..`"critical"`, and `action` is the concrete
 /// deny (or `None`).
@@ -58,19 +78,24 @@ struct Decision {
     severity: String,
     reason: String,
     action: Option<EnforceAction>,
+    risk: Option<RiskDescriptor>,
 }
 
 #[pymethods]
 impl Decision {
     fn __repr__(&self) -> String {
         format!(
-            "Decision(verdict={:?}, tier={:?}, severity={:?}, reason={:?}, action={})",
+            "Decision(verdict={:?}, tier={:?}, severity={:?}, reason={:?}, action={}, risk={})",
             self.verdict,
             self.tier,
             self.severity,
             self.reason,
             match &self.action {
                 Some(a) => a.__repr__(),
+                None => "None".to_string(),
+            },
+            match &self.risk {
+                Some(r) => r.__repr__(),
                 None => "None".to_string(),
             }
         )
@@ -100,6 +125,7 @@ fn tier_str(t: Tier) -> &'static str {
         Tier::Rules => "Rules",
         Tier::Llm => "Llm",
         Tier::Agent => "Agent",
+        Tier::Sae => "Sae",
     }
 }
 
@@ -111,6 +137,16 @@ impl From<CoreDecision> for Decision {
             severity: severity_str(d.severity).to_string(),
             reason: d.reason,
             action: d.action.as_ref().map(EnforceAction::from),
+            risk: d.risk.map(|r| RiskDescriptor {
+                category: r.category,
+                name: r.name,
+                risk_type: match r.risk_type {
+                    CoreRiskType::System => "system",
+                    CoreRiskType::Communication => "communication",
+                    CoreRiskType::Atomic => "atomic",
+                }
+                .to_string(),
+            }),
         }
     }
 }
@@ -207,6 +243,7 @@ fn a3s_sentry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Sentry>()?;
     m.add_class::<Decision>()?;
     m.add_class::<EnforceAction>()?;
+    m.add_class::<RiskDescriptor>()?;
     m.add_function(wrap_pyfunction!(tool_exec, m)?)?;
     m.add_function(wrap_pyfunction!(egress, m)?)?;
     m.add_function(wrap_pyfunction!(file_access, m)?)?;

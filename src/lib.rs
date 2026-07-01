@@ -41,4 +41,6 @@ pub use pipeline::{Judge, Pipeline};
 pub use rules::{default_rules, LiveRules, RuleEngine, RuleSpec};
 pub use sae::{FeatureDict, FeatureLabel, SaeJudge};
 pub use sdk::Sentry;
-pub use verdict::{Decision, Driver, EnforceAction, SaeScore, Severity, Tier, Verdict};
+pub use verdict::{
+    Decision, Driver, EnforceAction, RiskDescriptor, RiskType, SaeScore, Severity, Tier, Verdict,
+};

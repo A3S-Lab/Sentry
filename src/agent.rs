@@ -173,6 +173,7 @@ impl Judge for AgentJudge {
                 if v.verdict.eq_ignore_ascii_case("block") {
                     Decision::block(Tier::Agent, severity, reason)
                         .with_action(ev.event.natural_deny())
+                        .with_inferred_risk(ev.event.name())
                 } else {
                     Decision::allow(Tier::Agent, reason)
                 }
@@ -197,6 +198,9 @@ impl Judge for AgentJudge {
                     } else {
                         None
                     },
+                    risk: (verdict == Verdict::Block).then(|| {
+                        crate::verdict::RiskDescriptor::infer(ev.event.name(), "L3 unavailable")
+                    }),
                     explain: None,
                 }
             }

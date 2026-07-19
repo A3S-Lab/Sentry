@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0] — inline wire inspection + stable risk taxonomy
+
+### Added
+
+- **Inline LLM/MCP wire inspection** — `Sentry::inspect_wire` evaluates request and response JSON
+  before it crosses the provider boundary, blocks dangerous content, and masks detected secrets and
+  PII in allowed payloads.
+- **Stable risk taxonomy** — non-allow and unresolved-escalation decisions can carry a structured
+  `risk` (`category`, `name`, and `risk_type`) so downstream systems do not need to parse
+  human-readable reasons.
+- **Rust crate distribution** — tagged releases now publish `a3s-sentry` to crates.io for direct
+  embedding by Rust consumers such as A3S Gateway.
+
 ## [0.6.0] — embeddable judge + native in-process SDKs
 
 The SDKs are now **native in-process bindings** (PyO3 / napi-rs), not subprocess wrappers — the Rust

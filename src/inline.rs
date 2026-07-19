@@ -70,7 +70,7 @@ impl InlineDecision {
         let mut restores = HashMap::new();
         // Right-to-left: replacing a later span never shifts an earlier span's offsets.
         let mut spans: Vec<&Redaction> = self.redactions.iter().collect();
-        spans.sort_by(|a, b| b.start.cmp(&a.start));
+        spans.sort_by_key(|redaction| std::cmp::Reverse(redaction.start));
         for r in spans {
             if r.end > out.len() || r.start > r.end {
                 continue; // defensive: never panic on a stale span

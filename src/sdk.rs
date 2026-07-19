@@ -20,7 +20,7 @@ pub struct Sentry {
 }
 
 impl Sentry {
-    /// Build from an ACL config document (see [`SdkConfig`](crate::config::SdkConfig)).
+    /// Build from an ACL config document (see [`SdkConfig`]).
     pub fn from_acl(acl: &str) -> anyhow::Result<Self> {
         let (pipeline, enforcer) = SdkConfig::from_acl(acl)?.build()?;
         Ok(Self {

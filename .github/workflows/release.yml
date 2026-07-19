@@ -11,6 +11,21 @@ permissions:
   packages: write # push to ghcr.io
 
 jobs:
+  crate:
+    name: Publish Rust crate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify package
+        run: cargo publish --locked --dry-run
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish --locked
+
   binary:
     runs-on: ubuntu-latest
     steps:

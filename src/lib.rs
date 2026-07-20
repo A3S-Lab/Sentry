@@ -25,6 +25,9 @@ pub mod inline;
 pub mod llm;
 pub mod metrics;
 pub mod pipeline;
+pub mod policy;
+mod policy_binding;
+mod policy_error;
 pub mod rules;
 pub mod sae;
 pub mod sdk;
@@ -38,6 +41,11 @@ pub use inline::{Direction, InlineDecision, Redaction};
 pub use llm::LlmJudge;
 pub use metrics::Metrics;
 pub use pipeline::{EscalationCause, Judge, Pipeline, ThroughL2Result, ThroughL2StageStatus};
+pub use policy::{
+    PolicyBinding, PolicyBindingError, PolicyBindingField, PolicyEnvelope, PolicyEnvelopeError,
+    PolicyExpectation, PolicyExpectationError, PolicyVerificationError, POLICY_ENVELOPE_LIMITS,
+    POLICY_ENVELOPE_VERSION,
+};
 pub use rules::{default_rules, LiveRules, RuleEngine, RuleSpec};
 pub use sae::{FeatureDict, FeatureLabel, SaeJudge};
 pub use sdk::Sentry;

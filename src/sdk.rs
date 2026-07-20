@@ -8,7 +8,7 @@ use crate::config::SdkConfig;
 use crate::enforce::Enforcer;
 use crate::event::ObservedEvent;
 use crate::inline::{self, Direction, InlineDecision};
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, ThroughL2Result};
 use crate::verdict::{Decision, Verdict};
 use std::path::Path;
 use std::sync::Mutex;
@@ -53,6 +53,11 @@ impl Sentry {
         self.pipeline.evaluate(ev)
     }
 
+    /// Judge a parsed event through L2, preserving an unresolved escalation for an external L3.
+    pub fn evaluate_event_through_l2(&self, ev: &ObservedEvent) -> ThroughL2Result {
+        self.pipeline.evaluate_through_l2(ev)
+    }
+
     /// Inline gate for an in-flight LLM/MCP body: run the same tiered judges over the decoded wire
     /// `content` and return the [`InlineDecision`] (block/allow + secret/PII spans to redact). This is
     /// the pre-execution path a3s-gateway's wire proxy calls; the reactive [`evaluate`](Sentry::evaluate)
@@ -65,6 +70,12 @@ impl Sentry {
     pub fn evaluate(&self, event_json: &str) -> Option<Decision> {
         let ev = ObservedEvent::parse(event_json)?;
         Some(self.pipeline.evaluate(&ev))
+    }
+
+    /// Judge one observer event through L2 without invoking L3 or resolving escalation.
+    pub fn evaluate_through_l2(&self, event_json: &str) -> Option<ThroughL2Result> {
+        let ev = ObservedEvent::parse(event_json)?;
+        Some(self.pipeline.evaluate_through_l2(&ev))
     }
 
     /// Judge and, on a `block` carrying a target, write it to the configured deny-file. Returns the
@@ -143,5 +154,17 @@ mod tests {
                 .contains("/usr/bin/nc"));
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn evaluate_through_l2_preserves_unresolved_escalation() {
+        let s = Sentry::from_acl("").expect("config builds");
+        let result = s
+            .evaluate_through_l2(
+                r#"{"event":{"FileAccess":{"pid":1,"path":"/home/u/.aws/credentials","write":false}}}"#,
+            )
+            .unwrap();
+        assert_eq!(result.effective_decision.verdict, Verdict::Escalate);
+        assert_eq!(result.effective_decision.tier, crate::verdict::Tier::Rules);
     }
 }

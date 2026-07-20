@@ -18,7 +18,8 @@ produced the event), and when sentry can't decide it **allows** unless you tell 
 | | `A3S_SENTRY_FAIL_CLOSED` unset (default) | `A3S_SENTRY_FAIL_CLOSED=1` |
 |---|---|---|
 | Unresolved escalation (no deeper tier, or a tier errored) | **allow** | **block** |
-| Overload (worker queue full) | **allow** | **block** |
+| Complete-evidence overload (worker queue full) | **allow** | **block** |
+| Incomplete `ToolExec` evidence | **L1 escalation** | **L1 escalation** |
 | Posture | availability-first (matches observer) | safety-first |
 
 Fail-**closed** is correct for high-assurance workloads, but note the deny is coarse and node-global —
@@ -29,14 +30,21 @@ L2/L3 configured *and* headroom (see §4), or you trade a detectability gap for 
 secret egress, …) silently resolves to allow. Sentry prints a loud startup WARNING for exactly this.
 Fix it by configuring L2/L3 or setting fail-closed.
 
+Incomplete argv is deliberately different: Sentry will not ask a model to infer a benign suffix
+that observer did not capture. It preserves an L1 escalation for durable external L3 dispatch,
+regardless of fail mode. Alert if the consumer cannot persist or dispatch that result; treating it as
+an allow recreates the evidence gap. The bundled daemon audits this unresolved decision, including
+during worker overload, but does not itself provide a durable external L3 queue.
+
 ## 3. Alarms — the two metrics that mean "a block didn't land"
 
 Scrape `A3S_SENTRY_METRICS_ADDR` (`/metrics`). Page on either of these rising:
 
-- **`sentry_overload_degraded_total`** — escalations that fell through to the fail mode because the
-  worker queue was full. Under fail-open, each one is a **silent enforcement bypass**. Response:
-  raise `A3S_SENTRY_WORKERS` / `A3S_SENTRY_QUEUE`, speed up or disable the slow tier, or accept
-  fail-closed for the overflow. A non-zero rate means you are under-provisioned for your event rate.
+- **`sentry_overload_degraded_total`** — escalations rejected because the worker queue was full.
+  Complete-evidence events fall through to the fail mode; incomplete command evidence remains an
+  audited L1 escalation. Response: raise `A3S_SENTRY_WORKERS` / `A3S_SENTRY_QUEUE`, speed up or
+  disable the slow tier, or accept fail-closed for complete-evidence overflow. A non-zero rate means
+  you are under-provisioned for your event rate.
 - **`sentry_enforce_failed_total`** — a block whose deny-file write errored (disk full, read-only FS,
   bad path). The block did **not** take effect. Response: check the deny-file volume (space, mount,
   permissions). Sentry already retries the same target on its next occurrence, so a transient cause

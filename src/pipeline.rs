@@ -194,11 +194,7 @@ impl Pipeline {
             return through_l2_result(d1, None, Some(EscalationCause::L1));
         };
         let d2 = l2.judge(ev);
-        let cause = Some(if d2.verdict == Verdict::Escalate {
-            EscalationCause::L2
-        } else {
-            EscalationCause::L1
-        });
+        let cause = (d2.verdict == Verdict::Escalate).then_some(EscalationCause::L2);
         through_l2_result(d1, Some(d2), cause)
     }
 
@@ -480,7 +476,7 @@ mod tests {
         assert_eq!(result.l2_decision.as_ref().unwrap().verdict, Verdict::Block);
         assert_eq!(result.effective_decision.tier, Tier::Llm);
         assert_eq!(result.stage_status, ThroughL2StageStatus::Completed);
-        assert_eq!(result.escalation_cause, Some(EscalationCause::L1));
+        assert_eq!(result.escalation_cause, None);
     }
 
     #[test]
@@ -492,7 +488,7 @@ mod tests {
         assert_eq!(result.effective_decision.verdict, Verdict::Allow);
         assert_eq!(result.effective_decision.tier, Tier::Llm);
         assert_eq!(result.stage_status, ThroughL2StageStatus::Completed);
-        assert_eq!(result.escalation_cause, Some(EscalationCause::L1));
+        assert_eq!(result.escalation_cause, None);
     }
 
     #[test]

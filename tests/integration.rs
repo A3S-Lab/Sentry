@@ -40,6 +40,18 @@ const SSRF: &str =
     "{\"event\":{\"Egress\":{\"pid\":1,\"peer\":\"169.254.169.254\",\"port\":80}}}\n";
 const CREDS: &str =
     "{\"event\":{\"FileAccess\":{\"pid\":1,\"path\":\"/home/a/.aws/credentials\",\"write\":false}}}\n";
+const INCOMPLETE_EXEC: &str =
+    "{\"event\":{\"ToolExec\":{\"pid\":2,\"argv\":[\"echo\",\"sentry-incomplete-overload\"],\"argv_incomplete\":true}}}\n";
+
+fn overload_degraded(stderr: &str) -> u64 {
+    stderr
+        .lines()
+        .find(|line| line.contains("stopped —"))
+        .and_then(|line| line.rsplit(", ").next())
+        .and_then(|field| field.split_whitespace().next())
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
 
 #[test]
 fn blocks_metadata_ssrf_and_writes_egress_deny() {
@@ -190,16 +202,61 @@ fn overload_degrades_under_slow_l3_and_tiny_queue() {
         &input,
     );
     // final stderr stats line: "... stopped — N events, B blocked, D overload-degraded"
-    let degraded: u64 = stderr
-        .lines()
-        .find(|l| l.contains("stopped"))
-        .and_then(|l| l.rsplit_once(", ").map(|(_, t)| t.to_string()))
-        .and_then(|t| t.split_whitespace().next().map(str::to_string))
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0);
+    let degraded = overload_degraded(&stderr);
     assert!(
         degraded >= 1,
         "a slow L3 + queue=1 + workers=1 + 10 escalations should degrade some: {stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Incomplete command evidence is an unresolved L1 result, not a fail-open candidate. Even when a
+/// slow complete-evidence event fills the worker and queue, overload must preserve `escalate`.
+#[cfg(unix)]
+#[test]
+fn overload_never_converts_incomplete_exec_evidence_to_allow() {
+    let dir = tmp("incomplete-overload");
+    let bin = write_exec(
+        &dir,
+        "slow-agent.sh",
+        "#!/bin/sh\nsleep 0.3\necho '{\"verdict\":\"allow\",\"severity\":\"low\",\"reason\":\"slow\"}'\n",
+    );
+    let incomplete_count = 20;
+    let input = format!("{CREDS}{}", INCOMPLETE_EXEC.repeat(incomplete_count));
+    let (stdout, stderr) = run(
+        &[
+            ("A3S_SENTRY_AGENT_BIN", bin.to_str().unwrap()),
+            ("A3S_SENTRY_WORKERS", "1"),
+            ("A3S_SENTRY_QUEUE", "1"),
+        ],
+        &input,
+    );
+
+    assert!(
+        overload_degraded(&stderr) >= 1,
+        "the slow worker and tiny queue must exercise overload: {stderr}"
+    );
+    let verdicts = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|record| {
+            (record.get("subject")?.as_str()? == "echo sentry-incomplete-overload").then(|| {
+                record
+                    .pointer("/decision/verdict")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<missing>")
+                    .to_owned()
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        verdicts.len(),
+        incomplete_count,
+        "every incomplete event must be audited: {stdout}"
+    );
+    assert!(
+        verdicts.iter().all(|verdict| verdict == "escalate"),
+        "incomplete evidence must remain an escalation under overload: {stdout}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

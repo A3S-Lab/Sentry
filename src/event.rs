@@ -61,6 +61,10 @@ pub enum Event {
         pid: u32,
         #[serde(default)]
         argv: Vec<String>,
+        #[serde(default)]
+        argv_truncated: bool,
+        #[serde(default)]
+        argv_incomplete: bool,
     },
     SslContent {
         pid: u32,
@@ -105,6 +109,22 @@ pub enum Event {
 }
 
 impl Event {
+    /// Whether the observer could not provide the complete command evidence. A downstream model
+    /// cannot safely infer that an omitted suffix was benign, so this condition must never become
+    /// an ordinary allow decision.
+    pub fn evidence_incomplete(&self) -> bool {
+        matches!(
+            self,
+            Event::ToolExec {
+                argv_truncated: true,
+                ..
+            } | Event::ToolExec {
+                argv_incomplete: true,
+                ..
+            }
+        )
+    }
+
     /// The variant name — the L1 rule `on` selector (`"ToolExec"`, `"SslContent"`, …).
     pub fn name(&self) -> &'static str {
         match self {

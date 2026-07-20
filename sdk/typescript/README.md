@@ -25,6 +25,13 @@ if (d?.verdict === "block") {
 // judge AND write the deny-file the kernel guards read:
 const r = sentry.evaluateAndEnforce(toolExec(2, ["/usr/bin/ncat", "host", "4444"]));
 console.log(r?.decision.verdict, r?.enforced); // "block", "/path/exec.txt"
+
+// Stop after L2 and preserve an unresolved escalation for a durable external L3 worker. This runs
+// on the napi worker pool, so a slow L2 request does not block Node's event loop.
+const fast = await sentry.evaluateThroughL2(toolExec(3, ["bash", "-c", "base64 -d | sh"]));
+if (fast?.stageStatus === "escalated") {
+  console.log(fast.escalationCause, fast.effectiveDecision);
+}
 ```
 
 A `sentry.acl` carries everything (see [`config.rs`](../../src/config.rs) for the schema):
@@ -44,6 +51,10 @@ rules = [
 Event builders: `toolExec`, `egress`, `fileAccess`, `dns`, `sslContent`, `securityAction` — each
 returns the observer event JSON `evaluate` takes. `evaluate` returns `null` for an unparseable event,
 and a `Decision` (`{ verdict, tier, severity, reason, action? }`) otherwise — including `allow`.
+
+`evaluateThroughL2` returns a promise containing `l1Decision`, optional `l2Decision`,
+`effectiveDecision`, `stageStatus`, and optional `escalationCause`. It never invokes L3, never
+resolves an outstanding escalation through `fail_closed`, and ignores speculative L3 settings.
 
 ## Build / test (from source)
 

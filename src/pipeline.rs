@@ -13,6 +13,7 @@
 
 use crate::event::{Event, ObservedEvent};
 use crate::verdict::{Decision, Severity, Tier, Verdict};
+use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -28,6 +29,36 @@ const DEFAULT_L3_SPEC_CAP: u64 = 8;
 pub trait Judge: Send + Sync {
     fn tier(&self) -> Tier;
     fn judge(&self, ev: &ObservedEvent) -> Decision;
+}
+
+/// Where an evaluation that intentionally stops after L2 currently stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThroughL2StageStatus {
+    Completed,
+    Escalated,
+}
+
+/// The tier whose unresolved decision requires work beyond the fast path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EscalationCause {
+    L1,
+    L2,
+    Sae,
+}
+
+/// Structured L1/L2 output for callers that dispatch L3 outside this process.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThroughL2Result {
+    pub l1_decision: Decision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l2_decision: Option<Decision>,
+    pub effective_decision: Decision,
+    pub stage_status: ThroughL2StageStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalation_cause: Option<EscalationCause>,
 }
 
 /// The tiered judge. `l2`/`l3` are optional (rules-only, rules+LLM, or all three) and `Arc` so they
@@ -121,6 +152,9 @@ impl Pipeline {
         if d1.verdict != Verdict::Escalate {
             return d1;
         }
+        if ev.event.evidence_incomplete() {
+            return d1;
+        }
         match (&self.l2, &self.l3) {
             (Some(l2), Some(l3)) if self.should_speculate(&d1) => self.speculative(l2, l3, ev),
             (Some(l2), _) => self.sequential(l2, ev),
@@ -128,6 +162,44 @@ impl Pipeline {
             (None, Some(l3)) => l3.judge(ev),
             (None, None) => self.resolve_unescalated(d1),
         }
+    }
+
+    /// Evaluate through L2 without invoking L3 or resolving an outstanding escalation.
+    ///
+    /// This path deliberately ignores speculation and `fail_closed`. It is intended for systems
+    /// that persist an L2 escalation and dispatch L3 to a durable external worker. SAE activation
+    /// events retain their SAE decision and likewise never invoke L3 through this method.
+    pub fn evaluate_through_l2(&self, ev: &ObservedEvent) -> ThroughL2Result {
+        let d1 = if matches!(ev.event, Event::LlmActivations { .. }) {
+            self.sae
+                .as_ref()
+                .map_or_else(|| self.l1.judge(ev), |sae| sae.judge(ev))
+        } else {
+            self.l1.judge(ev)
+        };
+
+        if d1.verdict != Verdict::Escalate {
+            return through_l2_result(d1, None, None);
+        }
+
+        if ev.event.evidence_incomplete() {
+            return through_l2_result(d1, None, Some(EscalationCause::L1));
+        }
+
+        if d1.tier == Tier::Sae {
+            return through_l2_result(d1, None, Some(EscalationCause::Sae));
+        }
+
+        let Some(l2) = &self.l2 else {
+            return through_l2_result(d1, None, Some(EscalationCause::L1));
+        };
+        let d2 = l2.judge(ev);
+        let cause = Some(if d2.verdict == Verdict::Escalate {
+            EscalationCause::L2
+        } else {
+            EscalationCause::L1
+        });
+        through_l2_result(d1, Some(d2), cause)
     }
 
     /// Run only L1 — the cheap, always-on tier. A daemon can call this inline on its ingest thread
@@ -227,10 +299,32 @@ impl Pipeline {
     }
 }
 
+fn through_l2_result(
+    l1_decision: Decision,
+    l2_decision: Option<Decision>,
+    escalation_cause: Option<EscalationCause>,
+) -> ThroughL2Result {
+    let effective_decision = l2_decision.as_ref().unwrap_or(&l1_decision).clone();
+    let stage_status = if effective_decision.verdict == Verdict::Escalate {
+        ThroughL2StageStatus::Escalated
+    } else {
+        ThroughL2StageStatus::Completed
+    };
+    ThroughL2Result {
+        l1_decision,
+        l2_decision,
+        effective_decision,
+        stage_status,
+        escalation_cause,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::ObservedEvent;
+    use crate::rules::RuleEngine;
+    use std::sync::atomic::AtomicUsize;
 
     struct Fixed(Tier, Verdict);
     impl Judge for Fixed {
@@ -264,6 +358,21 @@ mod tests {
         }
     }
 
+    struct Counting(Tier, Verdict, Arc<AtomicUsize>);
+    impl Judge for Counting {
+        fn tier(&self) -> Tier {
+            self.0
+        }
+        fn judge(&self, _: &ObservedEvent) -> Decision {
+            self.2.fetch_add(1, Ordering::Relaxed);
+            match self.1 {
+                Verdict::Allow => Decision::allow(self.0, "ok"),
+                Verdict::Block => Decision::block(self.0, Severity::High, "bad"),
+                Verdict::Escalate => Decision::escalate(self.0, Severity::Medium, "unsure"),
+            }
+        }
+    }
+
     fn ev() -> ObservedEvent {
         ObservedEvent::parse(r#"{"event":{"ToolExec":{"pid":1,"argv":["x"]}}}"#).unwrap()
     }
@@ -272,6 +381,40 @@ mod tests {
     fn l1_block_is_final_no_l2_call() {
         let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Block)));
         assert_eq!(p.evaluate(&ev()).verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn incomplete_exec_evidence_stops_at_l1_and_never_calls_models() {
+        let l2_calls = Arc::new(AtomicUsize::new(0));
+        let l3_calls = Arc::new(AtomicUsize::new(0));
+        let p = Pipeline::new(Arc::new(RuleEngine::with_defaults_and(None).unwrap()))
+            .with_l2(Arc::new(Counting(
+                Tier::Llm,
+                Verdict::Allow,
+                Arc::clone(&l2_calls),
+            )))
+            .with_l3(Arc::new(Counting(
+                Tier::Agent,
+                Verdict::Allow,
+                Arc::clone(&l3_calls),
+            )));
+        let incomplete = ObservedEvent::parse(
+            r#"{"event":{"ToolExec":{"pid":1,"argv":["echo","safe-prefix"],"argv_truncated":true}}}"#,
+        )
+        .unwrap();
+
+        let direct = p.evaluate(&incomplete);
+        assert_eq!(direct.verdict, Verdict::Escalate);
+        assert_eq!(direct.tier, Tier::Rules);
+
+        let staged = p.evaluate_through_l2(&incomplete);
+        assert_eq!(staged.effective_decision.verdict, Verdict::Escalate);
+        assert_eq!(staged.effective_decision.tier, Tier::Rules);
+        assert_eq!(staged.stage_status, ThroughL2StageStatus::Escalated);
+        assert_eq!(staged.escalation_cause, Some(EscalationCause::L1));
+        assert!(staged.l2_decision.is_none());
+        assert_eq!(l2_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(l3_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -310,6 +453,81 @@ mod tests {
         let d = p.evaluate(&ev());
         assert_eq!(d.verdict, Verdict::Block);
         assert_eq!(d.tier, Tier::Agent);
+    }
+
+    #[test]
+    fn through_l2_returns_l1_final_without_calling_l2() {
+        let l2_calls = Arc::new(AtomicUsize::new(0));
+        let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Allow))).with_l2(Arc::new(
+            Counting(Tier::Llm, Verdict::Block, Arc::clone(&l2_calls)),
+        ));
+
+        let result = p.evaluate_through_l2(&ev());
+        assert_eq!(result.effective_decision.verdict, Verdict::Allow);
+        assert_eq!(result.stage_status, ThroughL2StageStatus::Completed);
+        assert_eq!(result.escalation_cause, None);
+        assert!(result.l2_decision.is_none());
+        assert_eq!(l2_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn through_l2_returns_l2_block_as_final_decision() {
+        let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Escalate)))
+            .with_l2(Arc::new(Fixed(Tier::Llm, Verdict::Block)));
+
+        let result = p.evaluate_through_l2(&ev());
+        assert_eq!(result.l1_decision.verdict, Verdict::Escalate);
+        assert_eq!(result.l2_decision.as_ref().unwrap().verdict, Verdict::Block);
+        assert_eq!(result.effective_decision.tier, Tier::Llm);
+        assert_eq!(result.stage_status, ThroughL2StageStatus::Completed);
+        assert_eq!(result.escalation_cause, Some(EscalationCause::L1));
+    }
+
+    #[test]
+    fn through_l2_returns_l2_allow_as_final_decision() {
+        let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Escalate)))
+            .with_l2(Arc::new(Fixed(Tier::Llm, Verdict::Allow)));
+
+        let result = p.evaluate_through_l2(&ev());
+        assert_eq!(result.effective_decision.verdict, Verdict::Allow);
+        assert_eq!(result.effective_decision.tier, Tier::Llm);
+        assert_eq!(result.stage_status, ThroughL2StageStatus::Completed);
+        assert_eq!(result.escalation_cause, Some(EscalationCause::L1));
+    }
+
+    #[test]
+    fn through_l2_preserves_escalation_and_never_calls_l3() {
+        let l3_calls = Arc::new(AtomicUsize::new(0));
+        let p = Pipeline::new(Arc::new(FixedSev(
+            Tier::Rules,
+            Verdict::Escalate,
+            Severity::Critical,
+        )))
+        .with_l2(Arc::new(Fixed(Tier::Llm, Verdict::Escalate)))
+        .with_l3(Arc::new(Counting(
+            Tier::Agent,
+            Verdict::Block,
+            Arc::clone(&l3_calls),
+        )))
+        .fail_closed(true)
+        .speculate_above(Some(Severity::Low));
+
+        let result = p.evaluate_through_l2(&ev());
+        assert_eq!(result.effective_decision.verdict, Verdict::Escalate);
+        assert_eq!(result.effective_decision.tier, Tier::Llm);
+        assert_eq!(result.stage_status, ThroughL2StageStatus::Escalated);
+        assert_eq!(result.escalation_cause, Some(EscalationCause::L2));
+        assert_eq!(l3_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn through_l2_preserves_l1_escalation_when_l2_is_absent() {
+        let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Escalate))).fail_closed(true);
+
+        let result = p.evaluate_through_l2(&ev());
+        assert_eq!(result.effective_decision.verdict, Verdict::Escalate);
+        assert_eq!(result.stage_status, ThroughL2StageStatus::Escalated);
+        assert_eq!(result.escalation_cause, Some(EscalationCause::L1));
     }
 
     #[test]

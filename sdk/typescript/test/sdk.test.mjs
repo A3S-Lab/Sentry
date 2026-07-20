@@ -110,6 +110,65 @@ test("L2 tier: an escalating event reaches L2 (unreachable URL → escalate, tie
   assert.equal(d.tier, "Llm");
 });
 
+test("evaluateThroughL2 preserves escalation without invoking L3", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sentry-through-l2-"));
+  try {
+    const marker = join(dir, "l3-called");
+    const bin = join(dir, "mock-agent.sh");
+    writeFileSync(
+      bin,
+      `#!/bin/sh\ntouch "${marker}"\necho '{"verdict":"block","severity":"critical","reason":"unexpected L3"}'\n`,
+    );
+    chmodSync(bin, 0o755);
+    const s = Sentry.create(`
+      fail_closed = true
+      speculate = "low"
+      llm { url = "http://127.0.0.1:1/v1" }
+      agent { bin = "${bin}" }
+    `);
+
+    const result = await s.evaluateThroughL2(
+      fileAccess(1, "/home/u/.aws/credentials", false),
+    );
+    assert.equal(result.l1Decision.verdict, "escalate");
+    assert.equal(result.l2Decision.verdict, "escalate");
+    assert.equal(result.effectiveDecision.verdict, "escalate");
+    assert.equal(result.effectiveDecision.tier, "Llm");
+    assert.equal(result.stageStatus, "escalated");
+    assert.equal(result.escalationCause, "l2");
+    assert.throws(() => readFileSync(marker), /ENOENT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("incomplete ToolExec evidence stops at L1 instead of becoming allow", async () => {
+  const s = Sentry.create(`
+    fail_closed = false
+    llm { url = "http://127.0.0.1:1/v1" }
+  `);
+  const event = JSON.stringify({
+    event: {
+      ToolExec: {
+        pid: 1,
+        argv: ["echo", "safe-prefix"],
+        argv_truncated: true,
+      },
+    },
+  });
+
+  const direct = s.evaluate(event);
+  assert.equal(direct.verdict, "escalate");
+  assert.equal(direct.tier, "Rules");
+  assert.match(direct.reason, /incomplete ToolExec evidence/);
+
+  const staged = await s.evaluateThroughL2(event);
+  assert.equal(staged.effectiveDecision.verdict, "escalate");
+  assert.equal(staged.effectiveDecision.tier, "Rules");
+  assert.equal(staged.l2Decision, undefined);
+  assert.equal(staged.escalationCause, "l1");
+});
+
 test("create() throws on a bad ACL config", () => {
   assert.throws(() => Sentry.create("this is not valid acl {{{"), /parsing sentry ACL config/);
 });

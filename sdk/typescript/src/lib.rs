@@ -6,9 +6,11 @@
 
 use a3s_sentry::{
     EnforceAction as CoreAction, RiskType as CoreRiskType, Sentry as CoreSentry, Severity, Tier,
-    Verdict,
+    ThroughL2StageStatus as CoreThroughL2StageStatus, Verdict,
 };
+use napi::{bindgen_prelude::AsyncTask, Env, Task};
 use napi_derive::napi;
+use std::sync::Arc;
 
 #[napi(object)]
 pub struct EnforceAction {
@@ -48,10 +50,41 @@ pub struct EnforceResult {
     pub enforced: Option<String>,
 }
 
+#[napi(object)]
+pub struct ThroughL2Result {
+    pub l1_decision: Decision,
+    pub l2_decision: Option<Decision>,
+    pub effective_decision: Decision,
+    /// `completed` | `escalated`.
+    pub stage_status: String,
+    /// `l1` | `l2` | `sae`, when the effective decision remains escalated.
+    pub escalation_cause: Option<String>,
+}
+
 /// An in-process sentry judge built from one ACL config.
 #[napi]
 pub struct Sentry {
-    inner: CoreSentry,
+    inner: Arc<CoreSentry>,
+}
+
+pub struct EvaluateThroughL2Task {
+    inner: Arc<CoreSentry>,
+    event: String,
+}
+
+impl Task for EvaluateThroughL2Task {
+    type Output = a3s_sentry::ThroughL2Result;
+    type JsValue = ThroughL2Result;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        self.inner
+            .evaluate_through_l2(&self.event)
+            .ok_or_else(|| napi::Error::from_reason("event is not parseable"))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(to_through_l2_result(output))
+    }
 }
 
 #[napi]
@@ -60,7 +93,9 @@ impl Sentry {
     #[napi(factory)]
     pub fn create(config: String) -> napi::Result<Sentry> {
         CoreSentry::create(&config)
-            .map(|inner| Sentry { inner })
+            .map(|inner| Sentry {
+                inner: Arc::new(inner),
+            })
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
@@ -68,6 +103,15 @@ impl Sentry {
     #[napi]
     pub fn evaluate(&self, event: String) -> Option<Decision> {
         self.inner.evaluate(&event).map(to_decision)
+    }
+
+    /// Judge through L2 on the napi worker pool, preserving escalation for an external L3 worker.
+    #[napi]
+    pub fn evaluate_through_l2(&self, event: String) -> AsyncTask<EvaluateThroughL2Task> {
+        AsyncTask::new(EvaluateThroughL2Task {
+            inner: Arc::clone(&self.inner),
+            event,
+        })
     }
 
     /// Judge and, on a block carrying a target, write it to the configured deny-file. `null` if the
@@ -80,6 +124,27 @@ impl Sentry {
                 decision: to_decision(d),
                 enforced,
             })
+    }
+}
+
+fn to_through_l2_result(result: a3s_sentry::ThroughL2Result) -> ThroughL2Result {
+    let stage_status = match result.stage_status {
+        CoreThroughL2StageStatus::Completed => "completed",
+        CoreThroughL2StageStatus::Escalated => "escalated",
+    };
+    ThroughL2Result {
+        l1_decision: to_decision(result.l1_decision),
+        l2_decision: result.l2_decision.map(to_decision),
+        effective_decision: to_decision(result.effective_decision),
+        stage_status: stage_status.to_string(),
+        escalation_cause: result.escalation_cause.map(|cause| {
+            match cause {
+                a3s_sentry::EscalationCause::L1 => "l1",
+                a3s_sentry::EscalationCause::L2 => "l2",
+                a3s_sentry::EscalationCause::Sae => "sae",
+            }
+            .to_string()
+        }),
     }
 }
 

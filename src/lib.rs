@@ -37,7 +37,7 @@ pub use event::{Event, Identity, ObservedEvent};
 pub use inline::{Direction, InlineDecision, Redaction};
 pub use llm::LlmJudge;
 pub use metrics::Metrics;
-pub use pipeline::{Judge, Pipeline};
+pub use pipeline::{EscalationCause, Judge, Pipeline, ThroughL2Result, ThroughL2StageStatus};
 pub use rules::{default_rules, LiveRules, RuleEngine, RuleSpec};
 pub use sae::{FeatureDict, FeatureLabel, SaeJudge};
 pub use sdk::Sentry;

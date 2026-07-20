@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Digest-bound workload policy envelope** — native ACL policy payloads can be canonicalized and
+  bound to an exact workload, revision, replica, node, generation, and `sha256:` policy digest.
+  Bounded, closed-schema admission rejects noncanonical bytes, tampering, invalid metadata, stale or
+  unexpected generations, and every identity/digest mismatch before apply.
+
 ## [0.7.0] — inline wire inspection + stable risk taxonomy
 
 ### Added

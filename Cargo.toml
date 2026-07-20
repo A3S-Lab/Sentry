@@ -13,6 +13,7 @@ regex = "1"
 ureq = { version = "2", features = ["json"] }
 hcl-rs = "0.18"
 anyhow = "1"
+a3s-acl = "0.3.0"
 
 # Unix-only: SIGKILL the L3 agent's whole process group on timeout (no std API for killpg).
 [target.'cfg(unix)'.dependencies]

@@ -169,6 +169,32 @@ in-house ruleset) and keep the escalation machinery. `evaluate_through_l2` never
 applies `fail_closed`; callers must durably dispatch any `Escalated` result instead of treating it as
 an allow.
 
+## Digest-bound workload policy envelope
+
+Cloud/node integrations can construct a canonical [`PolicyEnvelope`](docs/POLICY_ENVELOPE.md) that
+binds native ACL policy bytes to an exact workload, revision, replica, node, and positive generation.
+The node parser recomputes the `sha256:` canonical policy digest and accepts only canonical envelope
+bytes; `verify` then requires trusted desired identity, generation, and digest to match exactly.
+
+```rust
+use a3s_sentry::{PolicyBinding, PolicyEnvelope, PolicyExpectation};
+
+let binding = PolicyBinding::new("workload-01", "revision-07", "replica-01", "node-03")?;
+let envelope = PolicyEnvelope::from_policy_acl(
+    binding.clone(),
+    4,
+    r#"runtime_policy "sentry-v1" { default = "deny" }"#,
+)?;
+let received = PolicyEnvelope::parse(envelope.canonical_acl())?;
+let expected = PolicyExpectation::new(binding, 4, envelope.policy_digest())?;
+received.verify(&expected)?;
+```
+
+This is an immutable admission contract, not applied-state evidence. The current deny-file enforcer
+is still node-global and identity-blind; a workload must not become ready until a future typed
+backend proves that the same digest was completely applied. See the
+[policy-envelope contract and boundaries](docs/POLICY_ENVELOPE.md).
+
 ## SDKs (Python · TypeScript)
 
 **Native, in-process** SDKs — the Rust L1/L2/L3 judge embedded via PyO3 (Python) and napi-rs
@@ -364,6 +390,9 @@ Set `A3S_SENTRY_METRICS_ADDR` (e.g. `0.0.0.0:9100`) to expose, with no extra dep
 - **Fail-open by default.** If a tier escalates but the next tier is absent or erroring, sentry
   *allows*. So **rules-only + fail-open enforces no `escalate` rule** (sentry warns loudly at
   startup). Set `A3S_SENTRY_FAIL_CLOSED=1` and/or configure L2/L3 for safety-first deployments.
+- **A verified policy envelope is not enforcement evidence.** It proves canonical bytes and their
+  exact workload/revision/replica/node binding. The current daemon does not apply envelopes,
+  reconstruct them after restart, or gate workload readiness on an applied digest.
 - **Enforcement is coarse and identity-blind.** Denies are per binary-path / per IP, node-global —
   blocking `/usr/bin/curl` blocks all curl. A deny-exec on a *bare* name is dropped (observer's guard
   matches paths), so exec-deny effectively targets absolute-path payloads (e.g. `/tmp/x`); an attacker
@@ -386,16 +415,19 @@ cargo build --release
 ./scripts/soak.sh ./target/release/sentry 30   # sustained-load soak
 ```
 
-Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those live in a3s-observer.
+Pure userspace Rust — no kernel components; those live in a3s-observer.
 
-- **Unit** (67) — rules + escalation + enforce + parsing + the speculative/hot-reload/cap logic + the
-  metrics endpoint.
+- **Unit** (72) — rules + escalation + enforce + parsing + the speculative/hot-reload/cap logic +
+  policy-envelope invariants + the metrics endpoint.
 - **Integration** (`tests/integration.rs`, 13) — the real binary end to end: block → deny-file,
   dry-run, fail-open/closed, malformed-input, live hot-reload, `--version`, the **L2 round-trip**
   against a mock OpenAI endpoint, the **L3 agent** path (mock agent → block → deny-file), **overload
   handling** (slow L3 + queue=1 → graceful complete-evidence degradation while incomplete evidence
   stays escalated), and the **metrics endpoint** (live `/metrics` counters + `/healthz`). All
   CI-reproducible.
+- **Policy contract** (`tests/policy_envelope.rs`, 7) — canonical round-trip, semantic digest
+  stability, payload/digest tamper rejection, all four identity mismatch dimensions, stale/future
+  generations, bounded schema admission, duplicate-field rejection, and redacted failures.
 - **Soak** (`scripts/soak.sh` + `scripts/soak-l2.sh`) — sustained mixed load + policy-rewrite-under-load
   (10M+ events, RSS flat, 0 panics, dedup-bounded); and a **worker-pool soak** proving a slow L2 never
   head-of-line-blocks the L1 stream (**~1.15M ev/s on Linux with a 0.5s L2**, RSS flat 6.5 MB, graceful
@@ -421,6 +453,7 @@ Pure userspace Rust (serde / regex / ureq / hcl) — no kernel components; those
 | `llm.rs` | **L2** LLM classifier |
 | `agent.rs` | **L3** a3s-code investigator |
 | `pipeline.rs` | the `Judge` trait + L1→L2→L3 escalation |
+| `policy.rs` | canonical workload policy envelope + exact trusted-state verification |
 | `enforce.rs` | append blocks to observer deny-files |
 | `metrics.rs` | Prometheus `/metrics` + `/healthz` endpoint |
 | `bin/sentry.rs` | the daemon (stdin → judge → enforce → audit) |

@@ -1,8 +1,8 @@
 //! Self-observability: a tiny std-only metrics + health endpoint so an operator can ALARM on the
 //! signals that matter for a *fail-open* security control — chiefly `overload_degraded` (escalations
-//! that silently fell through to the fail mode because the worker queue was full) and `enforce_failed`
-//! (a block whose deny-write errored, i.e. a block that did not land). Opt-in via
-//! `A3S_SENTRY_METRICS_ADDR`; nothing is bound otherwise. No framework, no async — one accept thread.
+//! rejected by the worker queue) and `enforce_failed` (a block whose deny-write errored, i.e. a block
+//! that did not land). Opt-in via `A3S_SENTRY_METRICS_ADDR`; nothing is bound otherwise. No
+//! framework, no async — one accept thread.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -30,7 +30,7 @@ impl Metrics {
              # HELP sentry_blocked_total Events blocked (a deny-file write was attempted).\n\
              # TYPE sentry_blocked_total counter\n\
              sentry_blocked_total {}\n\
-             # HELP sentry_overload_degraded_total Escalations degraded to the fail mode (worker queue full) — a fail-OPEN bypass; alarm on rate > 0.\n\
+             # HELP sentry_overload_degraded_total Escalations rejected by the full worker queue; complete evidence uses the fail mode, incomplete evidence remains unresolved — alarm on rate > 0.\n\
              # TYPE sentry_overload_degraded_total counter\n\
              sentry_overload_degraded_total {}\n\
              # HELP sentry_enforce_failed_total Deny-file writes that errored (a block that did NOT land) — alarm on rate > 0.\n\

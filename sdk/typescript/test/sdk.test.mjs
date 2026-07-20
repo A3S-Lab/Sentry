@@ -142,6 +142,14 @@ test("evaluateThroughL2 preserves escalation without invoking L3", async () => {
   }
 });
 
+test("generated declarations preserve the structured through-L2 result", () => {
+  const declarations = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
+  assert.match(
+    declarations,
+    /evaluateThroughL2\(event: string\): Promise<ThroughL2Result>/,
+  );
+});
+
 test("incomplete ToolExec evidence stops at L1 instead of becoming allow", async () => {
   const s = Sentry.create(`
     fail_closed = false

@@ -40,8 +40,9 @@ fn main() -> anyhow::Result<()> {
     let pipeline = Arc::new(cfg.build_pipeline(live.clone())?);
     let enforcer = Arc::new(Mutex::new(cfg.build_enforcer()));
 
-    // Self-observability (opt-in). Alarm on `overload_degraded`/`enforce_failed` — both mean a block
-    // didn't take effect. Bind fails fast on a bad address rather than silently running blind.
+    // Self-observability (opt-in). Alarm on `overload_degraded`/`enforce_failed` — both mean the
+    // enforcement path may not have completed. Bind fails fast on a bad address rather than silently
+    // running blind.
     let metrics = Metrics::default();
     if let Some(addr) = &cfg.metrics_addr {
         let bound = a3s_sentry::metrics::serve(addr, metrics.clone())
@@ -89,7 +90,8 @@ fn main() -> anyhow::Result<()> {
 
     // Worker pool for the SLOW tiers. L1 runs inline on the ingest thread (µs), so a slow L2/L3
     // occupies a worker — not the event stream. Escalations dispatch to a bounded queue; if it fills
-    // (an escalation flood), the event degrades gracefully to the fail-open/closed verdict.
+    // (an escalation flood), complete evidence degrades gracefully to the fail-open/closed verdict.
+    // Incomplete command evidence remains an unresolved L1 escalation.
     let (tx, rx) = mpsc::sync_channel::<ObservedEvent>(cfg.queue_cap);
     let rx = Arc::new(Mutex::new(rx));
     let mut workers = Vec::new();
@@ -148,7 +150,11 @@ fn main() -> anyhow::Result<()> {
             if let Err(e) = tx.try_send(ev) {
                 let (mpsc::TrySendError::Full(ev) | mpsc::TrySendError::Disconnected(ev)) = e;
                 metrics.degraded.fetch_add(1, Ordering::Relaxed);
-                let d = pipeline.resolve_overload(d1);
+                let d = if ev.event.evidence_incomplete() {
+                    d1
+                } else {
+                    pipeline.resolve_overload(d1)
+                };
                 handle(&ev, &d, &enforcer, &metrics);
             }
         } else {

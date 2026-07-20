@@ -5,8 +5,8 @@
 //! (beyond what L3 itself spawns) — the same model as @a3s-lab/code.
 
 use a3s_sentry::{
-    EnforceAction as CoreAction, RiskType as CoreRiskType, Sentry as CoreSentry, Severity, Tier,
-    ThroughL2StageStatus as CoreThroughL2StageStatus, Verdict,
+    EnforceAction as CoreAction, RiskType as CoreRiskType, Sentry as CoreSentry, Severity,
+    ThroughL2StageStatus as CoreThroughL2StageStatus, Tier, Verdict,
 };
 use napi::{bindgen_prelude::AsyncTask, Env, Task};
 use napi_derive::napi;
@@ -72,6 +72,9 @@ pub struct EvaluateThroughL2Task {
     event: String,
 }
 
+// Register `Task::JsValue` with napi-rs so the generated declaration is
+// `Promise<ThroughL2Result>` rather than `Promise<unknown>`.
+#[napi]
 impl Task for EvaluateThroughL2Task {
     type Output = a3s_sentry::ThroughL2Result;
     type JsValue = ThroughL2Result;

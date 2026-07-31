@@ -12,7 +12,10 @@
 //! ```
 
 use ::a3s_sentry::verdict::{Decision as CoreDecision, EnforceAction as CoreAction, RiskType as CoreRiskType, Severity, Tier, Verdict};
-use ::a3s_sentry::Sentry as CoreSentry;
+use ::a3s_sentry::{
+    StageStatus as CoreStageStatus, StageStopReason as CoreStageStopReason,
+    Sentry as CoreSentry, ThroughL1Result as CoreThroughL1Result,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::json;
@@ -151,6 +154,38 @@ impl From<CoreDecision> for Decision {
     }
 }
 
+/// Structured L1-only result. An eligible escalation is preserved for a caller-owned dispatcher;
+/// incomplete evidence remains escalated but is not eligible for a model tier.
+#[pyclass(get_all)]
+#[derive(Clone)]
+struct ThroughL1Result {
+    l1_decision: Decision,
+    stage_status: String,
+    next_tier_eligible: bool,
+    stop_reason: String,
+}
+
+impl From<CoreThroughL1Result> for ThroughL1Result {
+    fn from(result: CoreThroughL1Result) -> Self {
+        let stage_status = match result.stage_status {
+            CoreStageStatus::Completed => "completed",
+            CoreStageStatus::Escalated => "escalated",
+            CoreStageStatus::Stopped => "stopped",
+        };
+        let stop_reason = match result.stop_reason {
+            CoreStageStopReason::DecisionFinal => "decision_final",
+            CoreStageStopReason::EvidenceIncomplete => "evidence_incomplete",
+            CoreStageStopReason::StageLimit => "stage_limit",
+        };
+        Self {
+            l1_decision: Decision::from(result.l1_decision),
+            stage_status: stage_status.to_string(),
+            next_tier_eligible: result.next_tier_eligible,
+            stop_reason: stop_reason.to_string(),
+        }
+    }
+}
+
 /// The in-process sentry judge — wraps `a3s_sentry::Sentry`.
 #[pyclass]
 struct Sentry {
@@ -172,6 +207,11 @@ impl Sentry {
     /// parseable observer event.
     fn evaluate(&self, event: &str) -> Option<Decision> {
         self.inner.evaluate(event).map(Decision::from)
+    }
+
+    /// Judge through L1 only without invoking L2/L3 or applying fail-open/fail-closed.
+    fn evaluate_l1(&self, event: &str) -> Option<ThroughL1Result> {
+        self.inner.evaluate_l1(event).map(ThroughL1Result::from)
     }
 
     /// Judge one event and, on a `block` carrying a target, write the deny to the configured
@@ -244,6 +284,7 @@ fn a3s_sentry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Decision>()?;
     m.add_class::<EnforceAction>()?;
     m.add_class::<RiskDescriptor>()?;
+    m.add_class::<ThroughL1Result>()?;
     m.add_function(wrap_pyfunction!(tool_exec, m)?)?;
     m.add_function(wrap_pyfunction!(egress, m)?)?;
     m.add_function(wrap_pyfunction!(file_access, m)?)?;

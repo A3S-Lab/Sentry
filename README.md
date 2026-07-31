@@ -226,10 +226,17 @@ firing at `tier=Rules`).
   const d = sentry.evaluate(egress(1, "169.254.169.254", 80));
   if (d?.verdict === "block") console.log(d.reason, d.action); // { kind: "DenyEgress", target: "…" }
 
+  // Run L1 only. An escalation is preserved for a caller-owned identity/tier router and no model
+  // is contacted, even when the ACL contains L2/L3 configuration.
+  const l1 = sentry.evaluateL1(
+    fileAccess(1, "/home/u/.aws/credentials", false),
+  );
+  if (l1?.nextTierEligible) await durableFastQueue.send(l1);
+
   const fast = await sentry.evaluateThroughL2(
     fileAccess(1, "/home/u/.aws/credentials", false),
   );
-  if (fast.stageStatus === "escalated") await durableL3Queue.send(fast);
+  if (fast.nextTierEligible) await durableL3Queue.send(fast);
   ```
 
 The `sentry.acl` config — rules, optional `llm {}` (L2) / `agent {}` (L3) backends, and `deny {}`

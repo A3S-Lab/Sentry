@@ -1,6 +1,6 @@
 {
   "name": "@a3s-lab/sentry",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Native (in-process) SDK for a3s-sentry — judge observer events through the embedded L1/L2/L3 pipeline.",
   "license": "MIT",
   "repository": {

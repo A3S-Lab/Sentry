@@ -6,6 +6,7 @@
 
 use a3s_sentry::{
     EnforceAction as CoreAction, RiskType as CoreRiskType, Sentry as CoreSentry, Severity,
+    StageStatus as CoreStageStatus, StageStopReason as CoreStageStopReason,
     ThroughL2StageStatus as CoreThroughL2StageStatus, Tier, Verdict,
 };
 use napi::{bindgen_prelude::AsyncTask, Env, Task};
@@ -59,6 +60,19 @@ pub struct ThroughL2Result {
     pub stage_status: String,
     /// `l1` | `l2` | `sae`, when the effective decision remains escalated.
     pub escalation_cause: Option<String>,
+    pub next_tier_eligible: bool,
+    /// `decision_final` | `evidence_incomplete` | `stage_limit`.
+    pub stop_reason: String,
+}
+
+#[napi(object)]
+pub struct ThroughL1Result {
+    pub l1_decision: Decision,
+    /// `completed` | `escalated` | `stopped`.
+    pub stage_status: String,
+    pub next_tier_eligible: bool,
+    /// `decision_final` | `evidence_incomplete` | `stage_limit`.
+    pub stop_reason: String,
 }
 
 /// An in-process sentry judge built from one ACL config.
@@ -108,6 +122,12 @@ impl Sentry {
         self.inner.evaluate(&event).map(to_decision)
     }
 
+    /// Judge through L1 only, preserving escalation without invoking L2/L3 or applying fail mode.
+    #[napi]
+    pub fn evaluate_l1(&self, event: String) -> Option<ThroughL1Result> {
+        self.inner.evaluate_l1(&event).map(to_through_l1_result)
+    }
+
     /// Judge through L2 on the napi worker pool, preserving escalation for an external L3 worker.
     #[napi]
     pub fn evaluate_through_l2(&self, event: String) -> AsyncTask<EvaluateThroughL2Task> {
@@ -148,6 +168,30 @@ fn to_through_l2_result(result: a3s_sentry::ThroughL2Result) -> ThroughL2Result 
             }
             .to_string()
         }),
+        next_tier_eligible: result.next_tier_eligible,
+        stop_reason: stage_stop_reason(result.stop_reason).to_string(),
+    }
+}
+
+fn to_through_l1_result(result: a3s_sentry::ThroughL1Result) -> ThroughL1Result {
+    let stage_status = match result.stage_status {
+        CoreStageStatus::Completed => "completed",
+        CoreStageStatus::Escalated => "escalated",
+        CoreStageStatus::Stopped => "stopped",
+    };
+    ThroughL1Result {
+        l1_decision: to_decision(result.l1_decision),
+        stage_status: stage_status.to_string(),
+        next_tier_eligible: result.next_tier_eligible,
+        stop_reason: stage_stop_reason(result.stop_reason).to_string(),
+    }
+}
+
+fn stage_stop_reason(reason: CoreStageStopReason) -> &'static str {
+    match reason {
+        CoreStageStopReason::DecisionFinal => "decision_final",
+        CoreStageStopReason::EvidenceIncomplete => "evidence_incomplete",
+        CoreStageStopReason::StageLimit => "stage_limit",
     }
 }
 

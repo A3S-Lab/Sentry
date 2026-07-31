@@ -26,10 +26,16 @@ if (d?.verdict === "block") {
 const r = sentry.evaluateAndEnforce(toolExec(2, ["/usr/bin/ncat", "host", "4444"]));
 console.log(r?.decision.verdict, r?.enforced); // "block", "/path/exec.txt"
 
+// Stop after L1. Escalation remains explicit and no L2/L3 backend is contacted.
+const l1 = sentry.evaluateL1(fileAccess(3, "/home/u/.aws/credentials", false));
+if (l1?.nextTierEligible) {
+  console.log(l1.l1Decision, l1.stageStatus, l1.stopReason);
+}
+
 // Stop after L2 and preserve an unresolved escalation for a durable external L3 worker. This runs
 // on the napi worker pool, so a slow L2 request does not block Node's event loop.
-const fast = await sentry.evaluateThroughL2(toolExec(3, ["bash", "-c", "base64 -d | sh"]));
-if (fast?.stageStatus === "escalated") {
+const fast = await sentry.evaluateThroughL2(toolExec(4, ["bash", "-c", "base64 -d | sh"]));
+if (fast?.nextTierEligible) {
   console.log(fast.escalationCause, fast.effectiveDecision);
 }
 ```
@@ -52,9 +58,13 @@ Event builders: `toolExec`, `egress`, `fileAccess`, `dns`, `sslContent`, `securi
 returns the observer event JSON `evaluate` takes. `evaluate` returns `null` for an unparseable event,
 and a `Decision` (`{ verdict, tier, severity, reason, action? }`) otherwise — including `allow`.
 
+`evaluateL1` returns `l1Decision`, `stageStatus`, `nextTierEligible`, and `stopReason`. It never
+invokes L2/L3 and never resolves escalation through `fail_closed`.
+
 `evaluateThroughL2` returns a promise containing `l1Decision`, optional `l2Decision`,
-`effectiveDecision`, `stageStatus`, and optional `escalationCause`. It never invokes L3, never
-resolves an outstanding escalation through `fail_closed`, and ignores speculative L3 settings.
+`effectiveDecision`, `stageStatus`, optional `escalationCause`, `nextTierEligible`, and
+`stopReason`. It never invokes L3, never resolves an outstanding escalation through `fail_closed`,
+and ignores speculative L3 settings.
 
 ## Build / test (from source)
 

@@ -136,10 +136,47 @@ test("evaluateThroughL2 preserves escalation without invoking L3", async () => {
     assert.equal(result.effectiveDecision.tier, "Llm");
     assert.equal(result.stageStatus, "escalated");
     assert.equal(result.escalationCause, "l2");
+    assert.equal(result.nextTierEligible, true);
+    assert.equal(result.stopReason, "stage_limit");
     assert.throws(() => readFileSync(marker), /ENOENT/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("evaluateL1 preserves escalation and never invokes configured L2/L3", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sentry-l1-only-"));
+  try {
+    const marker = join(dir, "l3-called");
+    const bin = join(dir, "mock-agent.sh");
+    writeFileSync(bin, `#!/bin/sh\ntouch "${marker}"\necho '{"verdict":"block","severity":"critical","reason":"unexpected L3"}'\n`);
+    chmodSync(bin, 0o755);
+    const s = Sentry.create(`
+      fail_closed = true
+      llm { url = "http://127.0.0.1:1/v1" }
+      agent { bin = "${bin}" }
+    `);
+
+    const result = s.evaluateL1(fileAccess(1, "/home/u/.aws/credentials", false));
+    assert.equal(result.l1Decision.verdict, "escalate");
+    assert.equal(result.stageStatus, "escalated");
+    assert.equal(result.nextTierEligible, true);
+    assert.equal(result.stopReason, "stage_limit");
+    assert.throws(() => readFileSync(marker), /ENOENT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("evaluateL1 marks incomplete evidence as stopped", () => {
+  const s = Sentry.create(CFG);
+  const result = s.evaluateL1(JSON.stringify({
+    event: { ToolExec: { pid: 1, argv: ["echo", "safe-prefix"], argv_truncated: true } },
+  }));
+  assert.equal(result.l1Decision.verdict, "escalate");
+  assert.equal(result.stageStatus, "stopped");
+  assert.equal(result.nextTierEligible, false);
+  assert.equal(result.stopReason, "evidence_incomplete");
 });
 
 test("generated declarations preserve the structured through-L2 result", () => {
@@ -147,6 +184,10 @@ test("generated declarations preserve the structured through-L2 result", () => {
   assert.match(
     declarations,
     /evaluateThroughL2\(event: string\): Promise<ThroughL2Result>/,
+  );
+  assert.match(
+    declarations,
+    /evaluateL1\(event: string\): ThroughL1Result | null/,
   );
 });
 

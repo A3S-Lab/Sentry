@@ -48,6 +48,37 @@ pub enum EscalationCause {
     Sae,
 }
 
+/// Status of a deliberately bounded staged evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStatus {
+    /// The current tier produced a terminal allow/block decision.
+    Completed,
+    /// The current tier requested a deeper judge and the evidence is eligible for dispatch.
+    Escalated,
+    /// The current tier requested escalation, but safety constraints prohibit deeper judgment.
+    Stopped,
+}
+
+/// Why a staged evaluation returned without invoking a deeper tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStopReason {
+    DecisionFinal,
+    EvidenceIncomplete,
+    StageLimit,
+}
+
+/// Structured L1 output for callers that select and durably dispatch deeper tiers themselves.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThroughL1Result {
+    pub l1_decision: Decision,
+    pub stage_status: StageStatus,
+    pub next_tier_eligible: bool,
+    pub stop_reason: StageStopReason,
+}
+
 /// Structured L1/L2 output for callers that dispatch L3 outside this process.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +90,8 @@ pub struct ThroughL2Result {
     pub stage_status: ThroughL2StageStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalation_cause: Option<EscalationCause>,
+    pub next_tier_eligible: bool,
+    pub stop_reason: StageStopReason,
 }
 
 /// The tiered judge. `l2`/`l3` are optional (rules-only, rules+LLM, or all three) and `Arc` so they
@@ -179,23 +212,76 @@ impl Pipeline {
         };
 
         if d1.verdict != Verdict::Escalate {
-            return through_l2_result(d1, None, None);
+            return through_l2_result(d1, None, None, false, StageStopReason::DecisionFinal);
         }
 
         if ev.event.evidence_incomplete() {
-            return through_l2_result(d1, None, Some(EscalationCause::L1));
+            return through_l2_result(
+                d1,
+                None,
+                Some(EscalationCause::L1),
+                false,
+                StageStopReason::EvidenceIncomplete,
+            );
         }
 
         if d1.tier == Tier::Sae {
-            return through_l2_result(d1, None, Some(EscalationCause::Sae));
+            return through_l2_result(
+                d1,
+                None,
+                Some(EscalationCause::Sae),
+                true,
+                StageStopReason::StageLimit,
+            );
         }
 
         let Some(l2) = &self.l2 else {
-            return through_l2_result(d1, None, Some(EscalationCause::L1));
+            return through_l2_result(
+                d1,
+                None,
+                Some(EscalationCause::L1),
+                true,
+                StageStopReason::StageLimit,
+            );
         };
         let d2 = l2.judge(ev);
         let cause = (d2.verdict == Verdict::Escalate).then_some(EscalationCause::L2);
-        through_l2_result(d1, Some(d2), cause)
+        let eligible = d2.verdict == Verdict::Escalate;
+        let stop_reason = if eligible {
+            StageStopReason::StageLimit
+        } else {
+            StageStopReason::DecisionFinal
+        };
+        through_l2_result(d1, Some(d2), cause, eligible, stop_reason)
+    }
+
+    /// Run only L1 and preserve a dispatchable escalation without invoking L2/L3 or applying the
+    /// fail mode. Incomplete evidence remains an escalation for audit, but is explicitly ineligible
+    /// for a deeper model judgment.
+    pub fn evaluate_through_l1(&self, ev: &ObservedEvent) -> ThroughL1Result {
+        let l1_decision = self.classify_l1(ev);
+        if l1_decision.verdict != Verdict::Escalate {
+            return ThroughL1Result {
+                l1_decision,
+                stage_status: StageStatus::Completed,
+                next_tier_eligible: false,
+                stop_reason: StageStopReason::DecisionFinal,
+            };
+        }
+        if ev.event.evidence_incomplete() {
+            return ThroughL1Result {
+                l1_decision,
+                stage_status: StageStatus::Stopped,
+                next_tier_eligible: false,
+                stop_reason: StageStopReason::EvidenceIncomplete,
+            };
+        }
+        ThroughL1Result {
+            l1_decision,
+            stage_status: StageStatus::Escalated,
+            next_tier_eligible: true,
+            stop_reason: StageStopReason::StageLimit,
+        }
     }
 
     /// Run only L1 — the cheap, always-on tier. A daemon can call this inline on its ingest thread
@@ -299,6 +385,8 @@ fn through_l2_result(
     l1_decision: Decision,
     l2_decision: Option<Decision>,
     escalation_cause: Option<EscalationCause>,
+    next_tier_eligible: bool,
+    stop_reason: StageStopReason,
 ) -> ThroughL2Result {
     let effective_decision = l2_decision.as_ref().unwrap_or(&l1_decision).clone();
     let stage_status = if effective_decision.verdict == Verdict::Escalate {
@@ -312,6 +400,8 @@ fn through_l2_result(
         effective_decision,
         stage_status,
         escalation_cause,
+        next_tier_eligible,
+        stop_reason,
     }
 }
 
@@ -462,6 +552,8 @@ mod tests {
         assert_eq!(result.effective_decision.verdict, Verdict::Allow);
         assert_eq!(result.stage_status, ThroughL2StageStatus::Completed);
         assert_eq!(result.escalation_cause, None);
+        assert!(!result.next_tier_eligible);
+        assert_eq!(result.stop_reason, StageStopReason::DecisionFinal);
         assert!(result.l2_decision.is_none());
         assert_eq!(l2_calls.load(Ordering::Relaxed), 0);
     }
@@ -513,6 +605,8 @@ mod tests {
         assert_eq!(result.effective_decision.tier, Tier::Llm);
         assert_eq!(result.stage_status, ThroughL2StageStatus::Escalated);
         assert_eq!(result.escalation_cause, Some(EscalationCause::L2));
+        assert!(result.next_tier_eligible);
+        assert_eq!(result.stop_reason, StageStopReason::StageLimit);
         assert_eq!(l3_calls.load(Ordering::Relaxed), 0);
     }
 
@@ -524,6 +618,49 @@ mod tests {
         assert_eq!(result.effective_decision.verdict, Verdict::Escalate);
         assert_eq!(result.stage_status, ThroughL2StageStatus::Escalated);
         assert_eq!(result.escalation_cause, Some(EscalationCause::L1));
+        assert!(result.next_tier_eligible);
+        assert_eq!(result.stop_reason, StageStopReason::StageLimit);
+    }
+
+    #[test]
+    fn through_l1_never_calls_deeper_judges() {
+        let l2_calls = Arc::new(AtomicUsize::new(0));
+        let l3_calls = Arc::new(AtomicUsize::new(0));
+        let p = Pipeline::new(Arc::new(Fixed(Tier::Rules, Verdict::Escalate)))
+            .with_l2(Arc::new(Counting(
+                Tier::Llm,
+                Verdict::Block,
+                Arc::clone(&l2_calls),
+            )))
+            .with_l3(Arc::new(Counting(
+                Tier::Agent,
+                Verdict::Block,
+                Arc::clone(&l3_calls),
+            )))
+            .fail_closed(true);
+
+        let result = p.evaluate_through_l1(&ev());
+        assert_eq!(result.l1_decision.verdict, Verdict::Escalate);
+        assert_eq!(result.stage_status, StageStatus::Escalated);
+        assert!(result.next_tier_eligible);
+        assert_eq!(result.stop_reason, StageStopReason::StageLimit);
+        assert_eq!(l2_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(l3_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn through_l1_marks_incomplete_evidence_ineligible() {
+        let p = Pipeline::new(Arc::new(RuleEngine::with_defaults_and(None).unwrap()));
+        let incomplete = ObservedEvent::parse(
+            r#"{"event":{"ToolExec":{"pid":1,"argv":["echo","safe-prefix"],"argv_truncated":true}}}"#,
+        )
+        .unwrap();
+
+        let result = p.evaluate_through_l1(&incomplete);
+        assert_eq!(result.l1_decision.verdict, Verdict::Escalate);
+        assert_eq!(result.stage_status, StageStatus::Stopped);
+        assert!(!result.next_tier_eligible);
+        assert_eq!(result.stop_reason, StageStopReason::EvidenceIncomplete);
     }
 
     #[test]

@@ -78,7 +78,22 @@ class TestSentry(unittest.TestCase):
 
     def test_unparseable_event_returns_none(self):
         self.assertIsNone(self.sentry.evaluate("not json"))
+        self.assertIsNone(self.sentry.evaluate_l1("not json"))
         self.assertIsNone(self.sentry.evaluate_and_enforce("still not json"))
+
+    def test_l1_only_preserves_escalation_without_invoking_models(self):
+        s = Sentry.create(
+            'fail_closed = true\n'
+            'llm { url = "http://127.0.0.1:1/v1" }\n'
+        )
+        result = s.evaluate_l1(
+            file_access(1, "/home/u/.aws/credentials", False)
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.l1_decision.verdict, "escalate")
+        self.assertEqual(result.stage_status, "escalated")
+        self.assertTrue(result.next_tier_eligible)
+        self.assertEqual(result.stop_reason, "stage_limit")
 
     # --- all six event builders, with and without identity/provider ---
 
@@ -225,7 +240,7 @@ class TestSentry(unittest.TestCase):
     def test_module_exposes_builders(self):
         for name in ("tool_exec", "egress", "file_access", "dns", "ssl_content", "security_action"):
             self.assertTrue(hasattr(a3s_sentry, name), name)
-        for name in ("Sentry", "Decision", "EnforceAction"):
+        for name in ("Sentry", "Decision", "EnforceAction", "ThroughL1Result"):
             self.assertTrue(hasattr(a3s_sentry, name), name)
 
 

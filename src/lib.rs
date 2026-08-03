@@ -40,7 +40,10 @@ pub use event::{Event, Identity, ObservedEvent};
 pub use inline::{Direction, InlineDecision, Redaction};
 pub use llm::LlmJudge;
 pub use metrics::Metrics;
-pub use pipeline::{EscalationCause, Judge, Pipeline, ThroughL2Result, ThroughL2StageStatus};
+pub use pipeline::{
+    EscalationCause, Judge, Pipeline, StageStatus, StageStopReason, ThroughL1Result,
+    ThroughL2Result, ThroughL2StageStatus,
+};
 pub use policy::{
     PolicyBinding, PolicyBindingError, PolicyBindingField, PolicyEnvelope, PolicyEnvelopeError,
     PolicyExpectation, PolicyExpectationError, PolicyVerificationError, POLICY_ENVELOPE_LIMITS,

@@ -8,7 +8,7 @@ use crate::config::SdkConfig;
 use crate::enforce::Enforcer;
 use crate::event::ObservedEvent;
 use crate::inline::{self, Direction, InlineDecision};
-use crate::pipeline::{Pipeline, ThroughL2Result};
+use crate::pipeline::{Pipeline, ThroughL1Result, ThroughL2Result};
 use crate::verdict::{Decision, Verdict};
 use std::path::Path;
 use std::sync::Mutex;
@@ -58,6 +58,12 @@ impl Sentry {
         self.pipeline.evaluate_through_l2(ev)
     }
 
+    /// Judge a parsed event through L1 only, preserving an eligible escalation for a caller-owned
+    /// deeper-tier dispatcher.
+    pub fn evaluate_event_l1(&self, ev: &ObservedEvent) -> ThroughL1Result {
+        self.pipeline.evaluate_through_l1(ev)
+    }
+
     /// Inline gate for an in-flight LLM/MCP body: run the same tiered judges over the decoded wire
     /// `content` and return the [`InlineDecision`] (block/allow + secret/PII spans to redact). This is
     /// the pre-execution path a3s-gateway's wire proxy calls; the reactive [`evaluate`](Sentry::evaluate)
@@ -76,6 +82,13 @@ impl Sentry {
     pub fn evaluate_through_l2(&self, event_json: &str) -> Option<ThroughL2Result> {
         let ev = ObservedEvent::parse(event_json)?;
         Some(self.pipeline.evaluate_through_l2(&ev))
+    }
+
+    /// Judge one observer event through L1 only. This never invokes L2/L3 and never resolves an
+    /// escalation through fail-open/fail-closed.
+    pub fn evaluate_l1(&self, event_json: &str) -> Option<ThroughL1Result> {
+        let ev = ObservedEvent::parse(event_json)?;
+        Some(self.pipeline.evaluate_through_l1(&ev))
     }
 
     /// Judge and, on a `block` carrying a target, write it to the configured deny-file. Returns the
@@ -166,5 +179,23 @@ mod tests {
             .unwrap();
         assert_eq!(result.effective_decision.verdict, Verdict::Escalate);
         assert_eq!(result.effective_decision.tier, crate::verdict::Tier::Rules);
+    }
+
+    #[test]
+    fn evaluate_l1_preserves_escalation_without_fail_mode_resolution() {
+        let sentry = Sentry::from_acl(
+            r#"
+                fail_closed = true
+                llm { url = "http://127.0.0.1:1/v1" }
+            "#,
+        )
+        .unwrap();
+        let result = sentry
+            .evaluate_l1(
+                r#"{"event":{"FileAccess":{"pid":1,"path":"/home/u/.aws/credentials","write":false}}}"#,
+            )
+            .unwrap();
+        assert_eq!(result.l1_decision.verdict, Verdict::Escalate);
+        assert!(result.next_tier_eligible);
     }
 }

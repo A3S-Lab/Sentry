@@ -1,0 +1,228 @@
+name: release-preflight
+
+# Validate a release candidate without publishing crates, packages, images, tags, or a GitHub
+# Release. Pull requests run without registry secrets; a manual run on main also validates tokens.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  metadata:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      rust-version: ${{ steps.versions.outputs.rust-version }}
+      typescript-version: ${{ steps.versions.outputs.typescript-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - id: versions
+        name: Verify versions, locks, changelog, and unused tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RUST_VERSION=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "a3s-sentry") | .version')
+          TYPESCRIPT_VERSION=$(cargo metadata --locked --no-deps --format-version 1 \
+            --manifest-path sdk/typescript/Cargo.toml \
+            | jq -r '.packages[] | select(.name == "a3s-sentry-node") | .version')
+          TYPESCRIPT_PACKAGE_VERSION=$(node -p \
+            "require('./sdk/typescript/package.json').version")
+
+          cargo metadata --locked --no-deps --format-version 1 \
+            --manifest-path sdk/python/Cargo.toml >/dev/null
+
+          test -n "$RUST_VERSION"
+          test -n "$TYPESCRIPT_VERSION"
+          test "$TYPESCRIPT_VERSION" = "$TYPESCRIPT_PACKAGE_VERSION"
+          grep -Fq "## [$RUST_VERSION]" CHANGELOG.md
+          grep -Fq "a3s-sentry@$RUST_VERSION" README.md
+
+          if git rev-parse --verify --quiet "refs/tags/v$RUST_VERSION"; then
+            echo "Rust release tag v$RUST_VERSION already exists" >&2
+            exit 1
+          fi
+          if git rev-parse --verify --quiet "refs/tags/ts-v$TYPESCRIPT_VERSION"; then
+            echo "TypeScript release tag ts-v$TYPESCRIPT_VERSION already exists" >&2
+            exit 1
+          fi
+
+          echo "rust-version=$RUST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "typescript-version=$TYPESCRIPT_VERSION" >> "$GITHUB_OUTPUT"
+
+  credentials:
+    name: Validate registry credentials
+    if: github.event_name == 'workflow_dispatch'
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Authenticate to crates.io without publishing
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CARGO_REGISTRY_TOKEN"
+          cargo owner --list a3s-sentry >/dev/null
+      - name: Authenticate to npm without publishing
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$NODE_AUTH_TOKEN"
+          npm whoami --registry https://registry.npmjs.org >/dev/null
+          if npm view \
+            "@a3s-lab/sentry@${{ needs.metadata.outputs.typescript-version }}" \
+            version --registry https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "npm version ${{ needs.metadata.outputs.typescript-version }} already exists" >&2
+            exit 1
+          fi
+
+  rust:
+    name: Rust crate and static Linux binary
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all
+      - name: Verify publishable crate
+        run: cargo publish --locked --dry-run
+      - name: Build static Linux binary
+        run: cargo build --release --locked --bin sentry --target x86_64-unknown-linux-musl
+      - name: Verify binary version and static linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY=target/x86_64-unknown-linux-musl/release/sentry
+          test "$($BINARY --version)" = \
+            "a3s-sentry ${{ needs.metadata.outputs.rust-version }}"
+          file "$BINARY" | grep -Fq "x86-64"
+          file "$BINARY" | grep -Fq "static-pie linked"
+          install -D "$BINARY" a3s-sentry-x86_64-linux
+          sha256sum a3s-sentry-x86_64-linux > a3s-sentry-x86_64-linux.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a3s-sentry-linux-${{ github.sha }}
+          path: |
+            a3s-sentry-x86_64-linux
+            a3s-sentry-x86_64-linux.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  typescript-build:
+    name: TypeScript native build (${{ matrix.target }})
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.host }}
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: npm ci
+      - run: npm run build -- --target ${{ matrix.target }}
+      - run: npm test
+        if: runner.os != 'Windows'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preflight-bindings-${{ matrix.target }}
+          path: |
+            sdk/typescript/*.node
+            sdk/typescript/index.js
+            sdk/typescript/index.d.ts
+          if-no-files-found: error
+          retention-days: 7
+
+  typescript-package:
+    name: Assemble and smoke-test npm package
+    needs: [metadata, typescript-build]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: preflight-bindings-*
+          path: sdk/typescript/artifacts
+      - name: Assemble all native bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp artifacts/*/*.node .
+          cp artifacts/preflight-bindings-x86_64-unknown-linux-gnu/index.js .
+          cp artifacts/preflight-bindings-x86_64-unknown-linux-gnu/index.d.ts .
+          test "$(find . -maxdepth 1 -name '*.node' | wc -l)" -eq 3
+      - name: Pack and install into a clean consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --json > pack-result.json
+          TARBALL=$(jq -r '.[0].filename' pack-result.json)
+          test -f "$TARBALL"
+          test "$(tar -tf "$TARBALL" | grep -c '\.node$')" -eq 3
+
+          CONSUMER_DIR=$(mktemp -d)
+          npm install --prefix "$CONSUMER_DIR" "$PWD/$TARBALL"
+          node -e "require(process.argv[1])" \
+            "$CONSUMER_DIR/node_modules/@a3s-lab/sentry"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a3s-sentry-npm-${{ github.sha }}
+          path: |
+            sdk/typescript/*.tgz
+            sdk/typescript/pack-result.json
+          if-no-files-found: error
+          retention-days: 7

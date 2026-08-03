@@ -11,8 +11,14 @@
 //! assert d.verdict == "block"
 //! ```
 
-use ::a3s_sentry::verdict::{Decision as CoreDecision, EnforceAction as CoreAction, RiskType as CoreRiskType, Severity, Tier, Verdict};
-use ::a3s_sentry::Sentry as CoreSentry;
+use ::a3s_sentry::verdict::{
+    Decision as CoreDecision, EnforceAction as CoreAction, RiskType as CoreRiskType, Severity,
+    Tier, Verdict,
+};
+use ::a3s_sentry::{
+    Sentry as CoreSentry, StageStatus as CoreStageStatus, StageStopReason as CoreStageStopReason,
+    ThroughL1Result as CoreThroughL1Result,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::json;
@@ -29,7 +35,10 @@ struct EnforceAction {
 #[pymethods]
 impl EnforceAction {
     fn __repr__(&self) -> String {
-        format!("EnforceAction(kind={:?}, target={:?})", self.kind, self.target)
+        format!(
+            "EnforceAction(kind={:?}, target={:?})",
+            self.kind, self.target
+        )
     }
 }
 
@@ -151,6 +160,38 @@ impl From<CoreDecision> for Decision {
     }
 }
 
+/// Structured L1-only result. An eligible escalation is preserved for a caller-owned dispatcher;
+/// incomplete evidence remains escalated but is not eligible for a model tier.
+#[pyclass(get_all)]
+#[derive(Clone)]
+struct ThroughL1Result {
+    l1_decision: Decision,
+    stage_status: String,
+    next_tier_eligible: bool,
+    stop_reason: String,
+}
+
+impl From<CoreThroughL1Result> for ThroughL1Result {
+    fn from(result: CoreThroughL1Result) -> Self {
+        let stage_status = match result.stage_status {
+            CoreStageStatus::Completed => "completed",
+            CoreStageStatus::Escalated => "escalated",
+            CoreStageStatus::Stopped => "stopped",
+        };
+        let stop_reason = match result.stop_reason {
+            CoreStageStopReason::DecisionFinal => "decision_final",
+            CoreStageStopReason::EvidenceIncomplete => "evidence_incomplete",
+            CoreStageStopReason::StageLimit => "stage_limit",
+        };
+        Self {
+            l1_decision: Decision::from(result.l1_decision),
+            stage_status: stage_status.to_string(),
+            next_tier_eligible: result.next_tier_eligible,
+            stop_reason: stop_reason.to_string(),
+        }
+    }
+}
+
 /// The in-process sentry judge — wraps `a3s_sentry::Sentry`.
 #[pyclass]
 struct Sentry {
@@ -172,6 +213,11 @@ impl Sentry {
     /// parseable observer event.
     fn evaluate(&self, event: &str) -> Option<Decision> {
         self.inner.evaluate(event).map(Decision::from)
+    }
+
+    /// Judge through L1 only without invoking L2/L3 or applying fail-open/fail-closed.
+    fn evaluate_l1(&self, event: &str) -> Option<ThroughL1Result> {
+        self.inner.evaluate_l1(event).map(ThroughL1Result::from)
     }
 
     /// Judge one event and, on a `block` carrying a target, write the deny to the configured
@@ -205,37 +251,85 @@ fn wrap(
 #[pyfunction]
 #[pyo3(signature = (pid, argv, agent=None, provider=None))]
 fn tool_exec(pid: u32, argv: Vec<String>, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("ToolExec", json!({ "pid": pid, "argv": argv }), agent, provider)
+    wrap(
+        "ToolExec",
+        json!({ "pid": pid, "argv": argv }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, peer, port=0, agent=None, provider=None))]
 fn egress(pid: u32, peer: &str, port: u16, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("Egress", json!({ "pid": pid, "peer": peer, "port": port }), agent, provider)
+    wrap(
+        "Egress",
+        json!({ "pid": pid, "peer": peer, "port": port }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, path, write=false, agent=None, provider=None))]
-fn file_access(pid: u32, path: &str, write: bool, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("FileAccess", json!({ "pid": pid, "path": path, "write": write }), agent, provider)
+fn file_access(
+    pid: u32,
+    path: &str,
+    write: bool,
+    agent: Option<&str>,
+    provider: Option<&str>,
+) -> String {
+    wrap(
+        "FileAccess",
+        json!({ "pid": pid, "path": path, "write": write }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, query, agent=None, provider=None))]
 fn dns(pid: u32, query: &str, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("Dns", json!({ "pid": pid, "query": query }), agent, provider)
+    wrap(
+        "Dns",
+        json!({ "pid": pid, "query": query }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, content, is_read=false, agent=None, provider=None))]
-fn ssl_content(pid: u32, content: &str, is_read: bool, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("SslContent", json!({ "pid": pid, "is_read": is_read, "content": content }), agent, provider)
+fn ssl_content(
+    pid: u32,
+    content: &str,
+    is_read: bool,
+    agent: Option<&str>,
+    provider: Option<&str>,
+) -> String {
+    wrap(
+        "SslContent",
+        json!({ "pid": pid, "is_read": is_read, "content": content }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, kind, detail=0, agent=None, provider=None))]
-fn security_action(pid: u32, kind: &str, detail: u64, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("SecurityAction", json!({ "pid": pid, "kind": kind, "detail": detail }), agent, provider)
+fn security_action(
+    pid: u32,
+    kind: &str,
+    detail: u64,
+    agent: Option<&str>,
+    provider: Option<&str>,
+) -> String {
+    wrap(
+        "SecurityAction",
+        json!({ "pid": pid, "kind": kind, "detail": detail }),
+        agent,
+        provider,
+    )
 }
 
 #[pymodule]
@@ -244,6 +338,7 @@ fn a3s_sentry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Decision>()?;
     m.add_class::<EnforceAction>()?;
     m.add_class::<RiskDescriptor>()?;
+    m.add_class::<ThroughL1Result>()?;
     m.add_function(wrap_pyfunction!(tool_exec, m)?)?;
     m.add_function(wrap_pyfunction!(egress, m)?)?;
     m.add_function(wrap_pyfunction!(file_access, m)?)?;

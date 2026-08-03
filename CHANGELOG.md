@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-03 — staged judgment SDK + digest-bound policies
+
 ### Added
+
+- **Staged L1 SDK contract** — Rust, TypeScript and Python callers can run `evaluate_l1` /
+  `evaluateL1` without invoking L2/L3 or resolving an escalation through the fail mode. Structured
+  stage status, next-tier eligibility and stop reasons make durable external routing auditable.
+- **Explicit L3 dispatch eligibility** — `ThroughL2Result` now states whether an escalation is safe
+  to dispatch and distinguishes incomplete evidence from an ordinary stage limit.
 
 - **Digest-bound workload policy envelope** — native ACL policy payloads can be canonicalized and
   bound to an exact workload, revision, replica, node, generation, and `sha256:` policy digest.

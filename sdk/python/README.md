@@ -41,7 +41,7 @@ rules = [
 Build the judge and evaluate observer events:
 
 ```python
-from a3s_sentry import Sentry, egress, dns, tool_exec
+from a3s_sentry import Sentry, egress, dns, file_access, tool_exec
 
 # `create` takes a config PATH (if it's a readable file) or inline ACL content.
 sentry = Sentry.create("sentry.acl")
@@ -59,6 +59,11 @@ print(sentry.evaluate(tool_exec(1234, ["ls", "-la"])).verdict)   # "allow"
 
 # An unparseable line returns None.
 assert sentry.evaluate("not json") is None
+
+# Run L1 only. This preserves escalation but never contacts configured L2/L3 backends.
+l1 = sentry.evaluate_l1(file_access(1234, "/home/u/.aws/credentials", False))
+print(l1.l1_decision.verdict)  # "escalate"
+print(l1.next_tier_eligible)   # True
 ```
 
 A `Decision` exposes `verdict` (`"allow"`/`"block"`/`"escalate"`), `tier` (`"Rules"`/`"Llm"`/`"Agent"`),

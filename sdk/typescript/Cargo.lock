@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-sentry"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "a3s-acl",
  "anyhow",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-sentry-node"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "a3s-sentry",
  "napi",

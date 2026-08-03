@@ -52,19 +52,20 @@ evidence.
 
 Published from the repo's own GitHub Actions (a `vX.Y.Z` tag runs [`release.yml`](.github/workflows/release.yml)):
 
-- **Rust crate** — `cargo add a3s-sentry@0.7.0` for embedding the policy engine and inline wire
+- **Rust crate** — `cargo add a3s-sentry@0.8.0` for embedding the policy engine and inline wire
   inspection in another Rust process.
-- **Daemon image** — `ghcr.io/a3s-lab/sentry:0.7.0` (and `:latest`). L1 + L2 out of the box; for L3
+- **Daemon image** — `ghcr.io/a3s-lab/sentry:0.8.0` (and `:latest`). L1 + L2 out of the box; for L3
   layer Node + `@a3s-lab/code` into a derived image.
   `docker run --rm -i ghcr.io/a3s-lab/sentry:latest < events.ndjson`
 - **Daemon binary** — `a3s-sentry-x86_64-linux` on the
-  [`v0.7.0` release](https://github.com/A3S-Lab/Sentry/releases/tag/v0.7.0).
+  [`v0.8.0` release](https://github.com/A3S-Lab/Sentry/releases/tag/v0.8.0).
 - **From source** — `cargo build --release` → `target/release/sentry`.
 - **SDKs** — `npm install @a3s-lab/sentry` (TypeScript); Python wheels on the
   [`python-v0.1.0` release](https://github.com/A3S-Lab/Sentry/releases/tag/python-v0.1.0) (see [SDKs](#sdks-python--typescript)).
 
 Operating it in production? See the [**operator runbook**](docs/RUNBOOK.md) (rollout, fail mode,
-alarms, tuning).
+alarms, tuning). Maintainers should follow the [**release guide**](docs/RELEASING.md) before pushing
+any version tag.
 
 ## Quickstart
 

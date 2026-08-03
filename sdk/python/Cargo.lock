@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-sentry-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "a3s-sentry",
  "pyo3",

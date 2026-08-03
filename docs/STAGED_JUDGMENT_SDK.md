@@ -1,6 +1,6 @@
 # Staged judgment SDK
 
-Status: implementation plan  
+Status: implemented
 Target branch: `feat/staged-judgment-sdk`
 
 ## Purpose
@@ -22,7 +22,7 @@ pub struct ThroughL1Result {
     pub l1_decision: Decision,
     pub stage_status: StageStatus,
     pub next_tier_eligible: bool,
-    pub stop_reason: Option<StageStopReason>,
+    pub stop_reason: StageStopReason,
 }
 ```
 
@@ -44,8 +44,8 @@ not infer safety from human-readable reasons.
 ## Compatibility
 
 Existing `evaluate`, `evaluateThroughL2`, and `evaluateAndEnforce` behavior stays unchanged. New
-fields are additive. Node declarations are generated and tested. The Node package receives a minor
-version bump according to repository release policy.
+fields are additive. Node declarations are generated and tested. The Node and Python packages
+receive minor version bumps according to repository release policy.
 
 ## Verification
 

@@ -11,10 +11,13 @@
 //! assert d.verdict == "block"
 //! ```
 
-use ::a3s_sentry::verdict::{Decision as CoreDecision, EnforceAction as CoreAction, RiskType as CoreRiskType, Severity, Tier, Verdict};
+use ::a3s_sentry::verdict::{
+    Decision as CoreDecision, EnforceAction as CoreAction, RiskType as CoreRiskType, Severity,
+    Tier, Verdict,
+};
 use ::a3s_sentry::{
-    StageStatus as CoreStageStatus, StageStopReason as CoreStageStopReason,
-    Sentry as CoreSentry, ThroughL1Result as CoreThroughL1Result,
+    Sentry as CoreSentry, StageStatus as CoreStageStatus, StageStopReason as CoreStageStopReason,
+    ThroughL1Result as CoreThroughL1Result,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -32,7 +35,10 @@ struct EnforceAction {
 #[pymethods]
 impl EnforceAction {
     fn __repr__(&self) -> String {
-        format!("EnforceAction(kind={:?}, target={:?})", self.kind, self.target)
+        format!(
+            "EnforceAction(kind={:?}, target={:?})",
+            self.kind, self.target
+        )
     }
 }
 
@@ -245,37 +251,85 @@ fn wrap(
 #[pyfunction]
 #[pyo3(signature = (pid, argv, agent=None, provider=None))]
 fn tool_exec(pid: u32, argv: Vec<String>, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("ToolExec", json!({ "pid": pid, "argv": argv }), agent, provider)
+    wrap(
+        "ToolExec",
+        json!({ "pid": pid, "argv": argv }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, peer, port=0, agent=None, provider=None))]
 fn egress(pid: u32, peer: &str, port: u16, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("Egress", json!({ "pid": pid, "peer": peer, "port": port }), agent, provider)
+    wrap(
+        "Egress",
+        json!({ "pid": pid, "peer": peer, "port": port }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, path, write=false, agent=None, provider=None))]
-fn file_access(pid: u32, path: &str, write: bool, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("FileAccess", json!({ "pid": pid, "path": path, "write": write }), agent, provider)
+fn file_access(
+    pid: u32,
+    path: &str,
+    write: bool,
+    agent: Option<&str>,
+    provider: Option<&str>,
+) -> String {
+    wrap(
+        "FileAccess",
+        json!({ "pid": pid, "path": path, "write": write }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, query, agent=None, provider=None))]
 fn dns(pid: u32, query: &str, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("Dns", json!({ "pid": pid, "query": query }), agent, provider)
+    wrap(
+        "Dns",
+        json!({ "pid": pid, "query": query }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, content, is_read=false, agent=None, provider=None))]
-fn ssl_content(pid: u32, content: &str, is_read: bool, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("SslContent", json!({ "pid": pid, "is_read": is_read, "content": content }), agent, provider)
+fn ssl_content(
+    pid: u32,
+    content: &str,
+    is_read: bool,
+    agent: Option<&str>,
+    provider: Option<&str>,
+) -> String {
+    wrap(
+        "SslContent",
+        json!({ "pid": pid, "is_read": is_read, "content": content }),
+        agent,
+        provider,
+    )
 }
 
 #[pyfunction]
 #[pyo3(signature = (pid, kind, detail=0, agent=None, provider=None))]
-fn security_action(pid: u32, kind: &str, detail: u64, agent: Option<&str>, provider: Option<&str>) -> String {
-    wrap("SecurityAction", json!({ "pid": pid, "kind": kind, "detail": detail }), agent, provider)
+fn security_action(
+    pid: u32,
+    kind: &str,
+    detail: u64,
+    agent: Option<&str>,
+    provider: Option<&str>,
+) -> String {
+    wrap(
+        "SecurityAction",
+        json!({ "pid": pid, "kind": kind, "detail": detail }),
+        agent,
+        provider,
+    )
 }
 
 #[pymodule]

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-03 — staged judgment SDK + digest-bound policies
+
 ### Added
 
 - **Staged L1 SDK contract** — Rust, TypeScript and Python callers can run `evaluate_l1` /

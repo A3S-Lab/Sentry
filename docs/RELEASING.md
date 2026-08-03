@@ -52,17 +52,20 @@ new version, not an already-published version.
 
 ## GitHub full-platform preflight
 
-Push the candidate commit to its review branch, then open **Actions → release-preflight → Run
-workflow** and select that branch. This workflow performs no publication. It:
+Push the candidate commit and open or update its pull request. The `release-preflight` workflow runs
+on the pull request without registry credentials and performs no publication. It:
 
 - verifies version metadata, lockfiles, changelog entries, and unused release tags;
-- authenticates `CARGO_TOKEN` and `NPM_TOKEN` without publishing;
 - runs Rust formatting, Clippy, tests, and `cargo publish --dry-run`;
 - builds and uploads the static Linux musl binary and SHA-256 file;
 - builds TypeScript bindings on Linux x64, macOS ARM64, and Windows x64;
 - assembles the npm tarball, verifies all three native bindings, and installs it in a clean consumer.
 
 Review the workflow summary and download the retained artifacts before approving the release commit.
+After merging the reviewed commit, open **Actions → release-preflight → Run workflow**, select
+`main`, and run it once more before creating any tag. A manual run repeats the full preflight and
+also authenticates `CARGO_TOKEN` and `NPM_TOKEN` without publishing. Registry credentials are never
+exposed to pull-request runs.
 
 ## Publish explicitly and sequentially
 

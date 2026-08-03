@@ -1,8 +1,9 @@
 name: release-preflight
 
-# Manually validate a release candidate without publishing crates, packages, images, tags, or a
-# GitHub Release. Select the candidate branch in the Actions UI before running this workflow.
+# Validate a release candidate without publishing crates, packages, images, tags, or a GitHub
+# Release. Pull requests run without registry secrets; a manual run on main also validates tokens.
 on:
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -64,6 +65,7 @@ jobs:
 
   credentials:
     name: Validate registry credentials
+    if: github.event_name == 'workflow_dispatch'
     needs: metadata
     runs-on: ubuntu-latest
     steps:

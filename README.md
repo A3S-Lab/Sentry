@@ -1,5 +1,12 @@
 # a3s-sentry
 
+<p>
+  <strong>Language / 语言:</strong>
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
+
+
 **Tiered runtime security control for AI agents.** Sentry is the policy brain for
 [a3s-observer](https://github.com/A3S-Lab/Observer): it reads observer's event stream — what an agent
 ran, sent, escalated — judges each event through **three escalating tiers**, and pushes a block down
